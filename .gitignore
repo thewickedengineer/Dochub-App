@@ -1,0 +1,19 @@
+# .NET
+bin/
+obj/
+*.user
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Local env
+.env
+.env.local
+*.local.json
+
+# Extracted design reference (regenerate from UI-design/)
+.design-extract/
+
+.DS_Store

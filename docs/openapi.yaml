@@ -1,0 +1,991 @@
+openapi: 3.0.3
+info:
+  title: Dochub API
+  version: "1.0.0"
+  description: |
+    Organizational RAG document hub.
+
+    **Nothing reaches the backend while a user is choosing sources.** The browser holds
+    repository details, folder ids and local files until Process is pressed.
+
+    **Process contract.** `POST /artifacts/{artifactId}/process` is the only call the
+    Upload screen makes. For each source it writes a `source_documents` row with status
+    `RequestUpload` and puts the source on the extract queue
+    (`dochub-source-upload-requested`). The extractor service claims one message at a
+    time, flips the row to `Uploading`, moves the files to Azure Blob storage under
+    `teams/{team}/groups/{group}/artifacts/{artifact}/{uploadedAt}`, sets `Uploaded`, and
+    hands the documents to the process queue (`dochub-document-process-requested`). A
+    separate Python vector service consumes that queue, stores the vectors, and moves the
+    source through `Processing` to `Processed`.
+
+    Local files are the one exception that needs a prior call: their bytes go to
+    `POST /uploads/staging` immediately before Process, and the returned staging ids are
+    passed in the source's `options`.
+
+    **Recurring updates.** A SharePoint or Google Drive source may carry a `schedule`,
+    recorded in `recurring_sync_schedules` (frequency, time of day, time zone, next run).
+    A scheduled run enters the same queues, but the extractor reconciles it against the
+    artifact **by file name**: changed content updates the document already held and is
+    re-queued so its vectors are replaced, new files are added, and unchanged files are
+    left alone.
+
+servers:
+  - url: http://localhost:5080
+    description: Local development
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Auth
+  - name: Organizations
+  - name: Workspace
+  - name: Uploads
+  - name: Processing
+  - name: Connections
+  - name: Notifications
+  - name: Knowledge base
+  - name: Scheduled updates
+
+paths:
+  /api/auth/sso:
+    post:
+      tags: [Auth]
+      summary: Exchange a Google or Microsoft ID token for a Dochub access token
+      description: New users are created on first sign-in but hold no organization until an owner adds them.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider, idToken]
+              properties:
+                provider:
+                  type: string
+                  enum: [google, microsoft, dev]
+                idToken:
+                  type: string
+                  description: The provider's ID token. For `dev` (local only), `email|Display Name`.
+                organizationId: { type: string, format: uuid, nullable: true }
+      responses:
+        "200": { description: Signed in, content: { application/json: { schema: { $ref: "#/components/schemas/AuthResponse" } } } }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /api/auth/me:
+    get:
+      tags: [Auth]
+      summary: Current user, active organization and memberships
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/AuthResponse" } } } }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /api/auth/switch-organization:
+    post:
+      tags: [Auth]
+      summary: Re-issue the access token scoped to another organization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [organizationId]
+              properties:
+                organizationId: { type: string, format: uuid }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/AuthResponse" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /api/organizations:
+    get:
+      tags: [Organizations]
+      summary: Organizations the caller belongs to
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Organization" } }
+    post:
+      tags: [Organizations]
+      summary: Create an organization
+      description: Requires the create-organizations privilege — the platform flag, or Owner/Admin in an existing organization.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                plan: { type: string, nullable: true }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/Organization" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /api/organizations/current/members:
+    get:
+      tags: [Organizations]
+      summary: Members of the active organization
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Member" } }
+    post:
+      tags: [Organizations]
+      summary: Add a member
+      description: Owner only. An unknown email creates a placeholder user that binds to a real provider on first SSO sign-in.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, role]
+              properties:
+                email: { type: string, format: email }
+                role: { type: string, enum: [Member, Admin, Owner] }
+                canCreateOrganizations: { type: boolean, nullable: true }
+                displayName: { type: string, nullable: true }
+      responses:
+        "201": { description: Added, content: { application/json: { schema: { $ref: "#/components/schemas/Member" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/organizations/current/members/{userId}:
+    parameters:
+      - { name: userId, in: path, required: true, schema: { type: string, format: uuid } }
+    patch:
+      tags: [Organizations]
+      summary: Change a member's level — owner only
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role: { type: string, enum: [Member, Admin, Owner], nullable: true }
+                canCreateOrganizations: { type: boolean, nullable: true }
+      responses:
+        "200": { description: Updated, content: { application/json: { schema: { $ref: "#/components/schemas/Member" } } } }
+        "409": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [Organizations]
+      summary: Remove a member — owner only
+      responses:
+        "204": { description: Removed }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/teams:
+    get:
+      tags: [Workspace]
+      summary: Team → group → artifact tree for the active organization
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Team" } }
+    post:
+      tags: [Workspace]
+      summary: Create a team
+      description: Any member may create a team; the creator joins it as lead.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, example: Claims }
+                description: { type: string, nullable: true }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/Team" } } } }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/teams/{teamId}/groups:
+    parameters:
+      - { name: teamId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Workspace]
+      summary: Create a group inside a team
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, example: Claims IT }
+                description: { type: string, nullable: true }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/Group" } } } }
+
+  /api/groups/{groupId}/artifacts:
+    parameters:
+      - { name: groupId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Workspace]
+      summary: Create an artifact inside a group
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, category, primarySource]
+              properties:
+                name: { type: string, example: Claims IT Technical }
+                category: { type: string, example: Technical documentation }
+                primarySource: { $ref: "#/components/schemas/SourceType" }
+                description: { type: string, nullable: true }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/ArtifactSummary" } } } }
+
+  /api/artifacts:
+    get:
+      tags: [Workspace]
+      summary: Flat artifact list — drives the upload destination picker
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ArtifactSummary" } }
+
+  /api/artifacts/{artifactId}:
+    parameters:
+      - { name: artifactId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Workspace]
+      summary: Artifact with its documents and upload history
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artifact: { $ref: "#/components/schemas/ArtifactSummary" }
+                  documents: { type: array, items: { $ref: "#/components/schemas/Document" } }
+                  sources: { type: array, items: { $ref: "#/components/schemas/SourceDocument" } }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/knowledge-base:
+    get:
+      tags: [Knowledge base]
+      summary: Current RAG state for the organization
+      description: Counts, per-artifact coverage and source mix. Visible to every member.
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/KnowledgeBase" } } } }
+
+  /api/uploads/staging:
+    post:
+      tags: [Processing]
+      summary: Stream local file bytes to the server, immediately before pressing Process
+      description: |
+        Only needed for local files, whose bytes the browser cannot hand to the extractor
+        directly. Send each file as a form file and its browser-relative path as a sibling
+        text field named `path:{fieldName}`, so folder structure survives into the blob
+        prefix. Nothing is recorded against an artifact until Process is called.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file0: { type: string, format: binary }
+                "path:file0": { type: string }
+      responses:
+        "200":
+          description: Staged
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/StagedFile" } }
+        "413": { $ref: "#/components/responses/Error" }
+
+  /api/artifacts/{artifactId}/process:
+    parameters:
+      - { name: artifactId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Processing]
+      summary: Submit one or more sources for processing
+      description: |
+        The only call the Upload screen makes. Every source is validated before any of
+        them is written, so a bad entry in a batch cannot leave half the submission queued.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sources]
+              properties:
+                sources:
+                  type: array
+                  minItems: 1
+                  items: { $ref: "#/components/schemas/SourceSubmission" }
+      responses:
+        "202":
+          description: Queued — poll each source's status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sources: { type: array, items: { $ref: "#/components/schemas/SourceDocument" } }
+                  schedules: { type: array, items: { $ref: "#/components/schemas/SyncSchedule" } }
+                  message: { type: string, example: "SRC-1042 queued · 4 documents from Claims IT Technical. We'll notify you as it progresses." }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/source-documents:
+    get:
+      tags: [Processing]
+      summary: The processing list for the active organization
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 50, minimum: 1, maximum: 200 } }
+        - { name: artifactId, in: query, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/SourceDocument" } }
+
+  /api/source-documents/{sourceDocumentId}:
+    parameters:
+      - { name: sourceDocumentId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Processing]
+      summary: One submitted source with its per-document detail
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  source: { $ref: "#/components/schemas/SourceDocument" }
+                  documents: { type: array, items: { $ref: "#/components/schemas/Document" } }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/source-documents/{sourceDocumentId}/retry:
+    parameters:
+      - { name: sourceDocumentId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Processing]
+      summary: Put a failed source back on the extract queue
+      responses:
+        "202": { description: Re-queued }
+        "409":
+          description: Only a failed source can be retried
+          content: { application/json: { schema: { $ref: "#/components/schemas/ApiError" } } }
+
+  /api/sync-schedules:
+    get:
+      tags: [Scheduled updates]
+      summary: Recurring updates configured in the active organization
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/SyncSchedule" } }
+
+  /api/sync-schedules/{scheduleId}:
+    parameters:
+      - { name: scheduleId, in: path, required: true, schema: { type: string, format: uuid } }
+    patch:
+      tags: [Scheduled updates]
+      summary: Change a schedule's cadence, or pause and resume it
+      description: Resuming an Active schedule also clears its failure count.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                frequency: { type: string, enum: [Daily, Weekly, Monthly], nullable: true }
+                timeOfDay: { type: string, example: "09:00", nullable: true }
+                timeZoneId: { type: string, example: Europe/London, nullable: true }
+                dayOfWeek: { type: integer, minimum: 0, maximum: 6, nullable: true }
+                dayOfMonth: { type: integer, minimum: 1, maximum: 28, nullable: true }
+                status: { type: string, enum: [Active, Paused], nullable: true }
+      responses:
+        "200": { description: Updated, content: { application/json: { schema: { $ref: "#/components/schemas/SyncSchedule" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [Scheduled updates]
+      summary: Stop keeping a location in sync
+      description: Removes the schedule. Documents already imported are untouched.
+      responses:
+        "204": { description: Removed }
+
+  /api/sync-schedules/{scheduleId}/run:
+    parameters:
+      - { name: scheduleId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Scheduled updates]
+      summary: Run a scheduled update immediately, without waiting for its next slot
+      responses:
+        "200":
+          description: Ran
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  added: { type: integer }
+                  updated: { type: integer }
+                  unchanged: { type: integer }
+                  failed: { type: integer }
+                  uploadBatchId: { type: string, format: uuid }
+                  jobNumber: { type: string, nullable: true, description: Null when nothing changed, so nothing was re-indexed. }
+                  message: { type: string }
+        "409":
+          description: Already running, or the source rejected the stored token
+          content: { application/json: { schema: { $ref: "#/components/schemas/ApiError" } } }
+
+  /api/connections:
+    get:
+      tags: [Connections]
+      summary: Source connections for the caller in the active organization
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/SourceConnection" } }
+    post:
+      tags: [Connections]
+      summary: Store or refresh a source access token
+      description: Tokens are encrypted at rest with ASP.NET Data Protection and never returned.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sourceType, accessToken]
+              properties:
+                sourceType: { $ref: "#/components/schemas/SourceType" }
+                accessToken: { type: string }
+                refreshToken: { type: string, nullable: true }
+                expiresAt: { type: string, format: date-time, nullable: true }
+                scopes: { type: string, nullable: true }
+                displayName: { type: string, nullable: true }
+      responses:
+        "200": { description: Stored, content: { application/json: { schema: { $ref: "#/components/schemas/SourceConnection" } } } }
+
+  /api/connections/oauth/{sourceType}/start:
+    parameters:
+      - name: sourceType
+        in: path
+        required: true
+        schema: { type: string, enum: [GoogleDrive, SharePoint, AzureDevOps] }
+    get:
+      tags: [Connections]
+      summary: Begin signing in to Google or Microsoft to grant access to documents
+      description: |
+        Returns the provider's consent URL, which the browser opens in a popup — a
+        full-page redirect would discard whatever sources the Upload screen is holding.
+        Authorization Code with PKCE; the `state` is encrypted and self-contained, so
+        no server-side session is needed.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  authorizeUrl: { type: string }
+                  provider: { type: string, enum: [Google, Microsoft] }
+                  sourceType: { $ref: "#/components/schemas/SourceType" }
+        "400":
+          description: That source does not sign in through an external provider
+          content: { application/json: { schema: { $ref: "#/components/schemas/ApiError" } } }
+        "503":
+          description: No client id configured for that provider
+          content: { application/json: { schema: { $ref: "#/components/schemas/ApiError" } } }
+
+  /api/connections/oauth/callback:
+    post:
+      tags: [Connections]
+      summary: Exchange the authorization code for tokens and store the connection
+      description: |
+        Posted by the popup after the provider redirects back. The exchange happens
+        server-side so the refresh token never reaches the browser. The caller must be
+        the user the `state` says began the flow, so a replayed callback cannot attach
+        someone else's account.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, state]
+              properties:
+                code: { type: string }
+                state: { type: string }
+      responses:
+        "200": { description: Connected, content: { application/json: { schema: { $ref: "#/components/schemas/SourceConnection" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403":
+          description: The flow was started by a different user or organization
+          content: { application/json: { schema: { $ref: "#/components/schemas/ApiError" } } }
+
+  /api/connections/resolve-link:
+    post:
+      tags: [Connections]
+      summary: Turn a pasted Drive or SharePoint link into the ids a connector needs
+      description: |
+        Resolves the link with the connected account's own access, so a permissions
+        problem surfaces here rather than halfway through an import. SharePoint links go
+        through Microsoft Graph `/shares`, which handles every URL shape SharePoint
+        produces; Drive folder ids are read from the URL and then verified.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [link, sourceConnectionId]
+              properties:
+                link:
+                  type: string
+                  example: https://drive.google.com/drive/folders/1AbC…
+                sourceConnectionId: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Resolved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sourceType: { $ref: "#/components/schemas/SourceType" }
+                  displayName: { type: string, example: Policy Forms }
+                  sourceReference: { type: string, example: "Google Drive › Policy Forms" }
+                  options:
+                    type: object
+                    additionalProperties: true
+                    description: Pass verbatim as a source's `options` when calling Process.
+        "400":
+          description: Not a recognizable link, or no connection to resolve it with
+          content: { application/json: { schema: { $ref: "#/components/schemas/ApiError" } } }
+        "409":
+          description: The link points at something the signed-in account cannot read
+          content: { application/json: { schema: { $ref: "#/components/schemas/ApiError" } } }
+
+  /api/connections/{connectionId}:
+    parameters:
+      - { name: connectionId, in: path, required: true, schema: { type: string, format: uuid } }
+    delete:
+      tags: [Connections]
+      summary: Revoke a source connection
+      responses:
+        "204": { description: Revoked }
+
+  /api/notifications:
+    get:
+      tags: [Notifications]
+      summary: Notifications for the caller, newest first
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+        - { name: unreadOnly, in: query, schema: { type: boolean } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Notification" } }
+                  unreadCount: { type: integer }
+
+  /api/notifications/read:
+    post:
+      tags: [Notifications]
+      summary: Mark notifications read
+      description: Send `null` or an empty body to mark everything read.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: array
+              nullable: true
+              items: { type: string, format: uuid }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { markedRead: { type: integer } } }
+
+  /health:
+    get:
+      summary: Liveness and database connectivity
+      security: []
+      responses:
+        "200": { description: Healthy }
+        "503": { description: Unhealthy }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Token from `POST /api/auth/sso`. Carries the active `org_id`, so every request is tenant-scoped by the token.
+
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiError" }
+
+  schemas:
+    ApiError:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, example: owner_only }
+        message: { type: string }
+        details: { nullable: true }
+
+    SourceType:
+      type: string
+      enum: [Local, GitHub, SharePoint, GoogleDrive, AzureDevOps, Confluence, Jira]
+
+    SourceDocumentStatus:
+      type: string
+      description: |
+        The whole journey of one submitted source.
+        RequestUpload → Uploading → Uploaded → Processing → Processed
+      enum: [RequestUpload, Uploading, Uploaded, Processing, Processed, PartiallyFailed, Failed, Cancelled]
+
+    DocumentStatus:
+      type: string
+      description: State of a single file inside a source.
+      enum: [Pending, Uploading, Uploaded, Processing, Indexed, Failed, Skipped]
+
+    SourceSubmission:
+      type: object
+      required: [sourceType, sourceReference]
+      properties:
+        sourceType: { $ref: "#/components/schemas/SourceType" }
+        sourceReference:
+          type: string
+          description: Human-readable pointer shown in the UI.
+          example: acme-ins/claims-core@main:/docs
+        sourceConnectionId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Required for SharePoint and Google Drive.
+        options:
+          type: object
+          description: |
+            Connector payload. GitHub: `repository`, `branch`, `path`, `fileTypes`.
+            SharePoint: `driveId`, `itemId`. Google Drive: `folderId`.
+            Azure DevOps: `organization`, `project`, `wiki`. Local: `stagingIds`.
+          additionalProperties: true
+          example: { repository: "acme-ins/claims-core", branch: "main", path: "docs", fileTypes: "md, yaml, adoc" }
+        documents:
+          type: array
+          nullable: true
+          description: Pre-declared files, so rows exist before extraction begins. Local sources only.
+          items:
+            type: object
+            required: [name, relativePath]
+            properties:
+              name: { type: string }
+              relativePath: { type: string }
+              sizeBytes: { type: integer, format: int64, nullable: true }
+              contentType: { type: string, nullable: true }
+        schedule:
+          nullable: true
+          description: Omit for a one-time import; supply it to also keep the location in sync.
+          allOf: [{ $ref: "#/components/schemas/SyncScheduleRequest" }]
+
+    SourceDocument:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        reference: { type: string, example: SRC-1042 }
+        artifactId: { type: string, format: uuid }
+        artifactName: { type: string }
+        path: { type: string, example: "Claims › Claims IT" }
+        sourceType: { $ref: "#/components/schemas/SourceType" }
+        sourceReference: { type: string }
+        status: { $ref: "#/components/schemas/SourceDocumentStatus" }
+        statusLabel: { type: string, example: Request Upload }
+        totalDocuments: { type: integer }
+        uploadedDocuments: { type: integer }
+        processedDocuments: { type: integer }
+        failedDocuments: { type: integer }
+        progressPercent:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Spans the whole journey — uploading fills the first half, processing the second.
+        blobContainer: { type: string, nullable: true }
+        blobPrefix:
+          type: string
+          nullable: true
+          example: teams/claims/groups/claims-it/artifacts/claims-it-technical/20260927T164512123Z
+        requestedBy: { type: string }
+        isScheduled: { type: boolean, description: True when a recurring schedule submitted this. }
+        requestedAt: { type: string, format: date-time }
+        uploadStartedAt: { type: string, format: date-time, nullable: true }
+        uploadedAt: { type: string, format: date-time, nullable: true }
+        processingStartedAt: { type: string, format: date-time, nullable: true }
+        processedAt: { type: string, format: date-time, nullable: true }
+        error: { type: string, nullable: true }
+
+    StagedFile:
+      type: object
+      properties:
+        stagingId: { type: string }
+        name: { type: string }
+        relativePath: { type: string, nullable: true }
+        sizeBytes: { type: integer, format: int64 }
+        contentType: { type: string, nullable: true }
+
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        displayName: { type: string }
+        avatarUrl: { type: string, nullable: true }
+        identityProvider: { type: string, example: google }
+        canCreateOrganizations: { type: boolean }
+        role: { type: string, enum: [Member, Admin, Owner], nullable: true }
+
+    Organization:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        initials: { type: string }
+        plan: { type: string }
+        role: { type: string, enum: [Member, Admin, Owner] }
+        memberCount: { type: integer }
+
+    AuthResponse:
+      type: object
+      properties:
+        accessToken: { type: string }
+        expiresAt: { type: string, format: date-time }
+        user: { $ref: "#/components/schemas/User" }
+        organization: { allOf: [{ $ref: "#/components/schemas/Organization" }], nullable: true }
+        organizations: { type: array, items: { $ref: "#/components/schemas/Organization" } }
+
+    Member:
+      type: object
+      properties:
+        userId: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string, format: email }
+        role: { type: string, enum: [Member, Admin, Owner] }
+        identityProvider: { type: string }
+        canCreateOrganizations: { type: boolean }
+        teams: { type: array, items: { type: string } }
+        joinedAt: { type: string, format: date-time }
+
+    Team:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        description: { type: string, nullable: true }
+        groupCount: { type: integer }
+        artifactCount: { type: integer }
+        groups: { type: array, items: { $ref: "#/components/schemas/Group" } }
+
+    Group:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        description: { type: string, nullable: true }
+        artifacts: { type: array, items: { $ref: "#/components/schemas/ArtifactSummary" } }
+
+    ArtifactSummary:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        category: { type: string }
+        primarySource: { $ref: "#/components/schemas/SourceType" }
+        groupId: { type: string, format: uuid }
+        groupName: { type: string }
+        teamId: { type: string, format: uuid }
+        teamName: { type: string }
+        totalDocuments: { type: integer }
+        indexedDocuments: { type: integer }
+        pendingDocuments: { type: integer }
+        processingDocuments: { type: integer }
+        failedDocuments: { type: integer }
+        status: { type: string, enum: [Indexed, Pending, Processing, Failed] }
+
+    Document:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        sourceDocumentId: { type: string, format: uuid }
+        name: { type: string }
+        relativePath: { type: string }
+        sourceLocation: { type: string }
+        sourceType: { $ref: "#/components/schemas/SourceType" }
+        status: { $ref: "#/components/schemas/DocumentStatus" }
+        sizeBytes: { type: integer, format: int64 }
+        contentType: { type: string, nullable: true }
+        blobPath:
+          type: string
+          nullable: true
+          example: teams/claims/groups/claims-it/artifacts/claims-it-technical/20260925T164512123Z/Data Dictionary v4.docx
+        blobUrl: { type: string, nullable: true }
+        blobUploadedAt: { type: string, format: date-time, nullable: true }
+        error: { type: string, nullable: true }
+        revision:
+          type: integer
+          description: Incremented each time a recurring sync replaces this document's content.
+        lastSyncedAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    KnowledgeBase:
+      type: object
+      properties:
+        stats:
+          type: object
+          properties:
+            totalDocuments: { type: integer }
+            indexed: { type: integer }
+            pending: { type: integer }
+            processing: { type: integer }
+            failed: { type: integer }
+            teams: { type: integer }
+            groups: { type: integer }
+            artifacts: { type: integer }
+            coveragePercent: { type: integer }
+        artifacts: { type: array, items: { $ref: "#/components/schemas/ArtifactSummary" } }
+        bySource:
+          type: array
+          items:
+            type: object
+            properties:
+              sourceType: { $ref: "#/components/schemas/SourceType" }
+              label: { type: string }
+              count: { type: integer }
+              percent: { type: integer }
+        lastIndexedAt: { type: string, format: date-time, nullable: true }
+
+    SyncScheduleRequest:
+      type: object
+      required: [frequency, timeOfDay]
+      properties:
+        frequency: { type: string, enum: [Daily, Weekly, Monthly] }
+        timeOfDay:
+          type: string
+          description: Wall-clock time in `timeZoneId`, 24-hour.
+          example: "09:00"
+        timeZoneId:
+          type: string
+          description: IANA id. Defaults to UTC, so a cadence survives DST changes intact.
+          example: Europe/London
+        dayOfWeek:
+          type: integer
+          minimum: 0
+          maximum: 6
+          nullable: true
+          description: 0 = Sunday. Weekly only.
+        dayOfMonth:
+          type: integer
+          minimum: 1
+          maximum: 28
+          nullable: true
+          description: Capped at 28 so the run happens in every month. Monthly only.
+
+    SyncSchedule:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        artifactId: { type: string, format: uuid }
+        artifactName: { type: string }
+        path: { type: string, example: "Policy › Policy Admin" }
+        sourceType: { type: string, enum: [SharePoint, GoogleDrive] }
+        sourceReference: { type: string }
+        frequency: { type: string, enum: [Daily, Weekly, Monthly] }
+        timeOfDay: { type: string, example: "09:00" }
+        timeZoneId: { type: string, example: Europe/London }
+        dayOfWeek: { type: integer, nullable: true }
+        dayOfMonth: { type: integer, nullable: true }
+        status: { type: string, enum: [Active, Paused, Failed] }
+        cadence: { type: string, example: Weekly on Monday at 09:00 Europe/London }
+        nextRunAt: { type: string, format: date-time }
+        lastRunAt: { type: string, format: date-time, nullable: true }
+        documentsAddedLastRun: { type: integer }
+        documentsUpdatedLastRun: { type: integer }
+        documentsUnchangedLastRun: { type: integer }
+        consecutiveFailures: { type: integer, description: After 5 the schedule pauses itself and notifies. }
+        lastError: { type: string, nullable: true }
+        createdBy: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    SourceConnection:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        sourceType: { $ref: "#/components/schemas/SourceType" }
+        displayName: { type: string }
+        status: { type: string, enum: [Disconnected, Connected, Expired, Revoked] }
+        expiresAt: { type: string, format: date-time, nullable: true }
+        scopes: { type: string, nullable: true }
+        updatedAt: { type: string, format: date-time }
+        account:
+          type: string
+          nullable: true
+          description: The account that consented, so two connections can be told apart.
+        canRefresh:
+          type: boolean
+          description: |
+            True when a refresh token is stored, so the connection renews itself. A
+            connection made by pasting a token has none and will expire.
+
+    Notification:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, example: processing.completed }
+        title: { type: string }
+        body: { type: string }
+        severity: { type: string, enum: [Info, Success, Warning, Error] }
+        entityType: { type: string, nullable: true }
+        entityId: { type: string, format: uuid, nullable: true }
+        read: { type: boolean }
+        createdAt: { type: string, format: date-time }

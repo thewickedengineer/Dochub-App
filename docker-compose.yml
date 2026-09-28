@@ -1,0 +1,43 @@
+# Local development infrastructure for Dochub.
+#
+#   docker compose up -d
+#
+# Brings up the two backing services the API expects on localhost. Azure Service
+# Bus has no local emulator, so the pipeline falls back to the in-process queue
+# unless ServiceBus:Enabled is turned on against a real namespace.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: dochub-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: dochub
+      POSTGRES_USER: dochub
+      POSTGRES_PASSWORD: dochub
+    ports:
+      - "5432:5432"
+    volumes:
+      - dochub-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dochub -d dochub"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Azure Blob emulator. The default devstoreaccount1 credentials are already
+  # wired into api/src/Dochub.Api/appsettings.Development.json.
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    container_name: dochub-azurite
+    restart: unless-stopped
+    command: azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0 --location /data
+    ports:
+      - "10000:10000"  # blob
+      - "10001:10001"  # queue
+      - "10002:10002"  # table
+    volumes:
+      - dochub-azurite:/data
+
+volumes:
+  dochub-pgdata:
+  dochub-azurite:
