@@ -11,12 +11,12 @@ import ScheduledUpdates from '../components/ScheduledUpdates';
 
 /** The connector tiles under "or import from a source". */
 const TILES = [
-  { source: 'SharePoint', label: 'Microsoft 365', connectCopy: 'Sign in with Microsoft' },
-  { source: 'GoogleDrive', label: 'Google Drive', connectCopy: 'Sign in with Google' },
-  { source: 'GitHub', label: 'GitHub', connectCopy: 'Connect GitHub' },
-  { source: 'AzureDevOps', label: 'Azure DevOps', connectCopy: 'Sign in with Microsoft' },
-  { source: 'Confluence', label: 'Confluence', connectCopy: 'Connect Atlassian' },
-  { source: 'Jira', label: 'Jira', connectCopy: 'Connect Atlassian' },
+  { source: 'SharePoint', label: 'Microsoft 365' },
+  { source: 'GoogleDrive', label: 'Google Drive' },
+  { source: 'GitHub', label: 'GitHub' },
+  { source: 'AzureDevOps', label: 'Azure DevOps' },
+  { source: 'Confluence', label: 'Confluence' },
+  { source: 'Jira', label: 'Jira' },
 ];
 
 export default function Upload() {
@@ -216,7 +216,7 @@ export default function Upload() {
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(180px,1fr))', gap: 10 }}>
           {TILES.map(tile => {
-            const connected = connectedSources.has(tile.source) || tile.source === 'GitHub';
+            const connected = connectedSources.has(tile.source);
             const s = srcOf(tile.source);
             return (
               <button
@@ -241,7 +241,7 @@ export default function Upload() {
                     alignItems: 'center', gap: 5, color: connected ? '#1F7A4F' : '#94600F',
                   }}>
                     <span style={{ flex: 'none', width: 6, height: 6, borderRadius: '50%', background: connected ? '#1F7A4F' : '#94600F' }} />
-                    {connected ? 'Connected · Import' : tile.connectCopy}
+                    {connected ? 'Connected · Import' : 'Not connected'}
                   </span>
                 </span>
               </button>

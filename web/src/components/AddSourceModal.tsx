@@ -12,7 +12,10 @@ import SyncSchedulePicker, {
 } from './SyncSchedulePicker';
 
 /** Only these locations can be re-listed later, so only they can be kept in sync. */
-const SYNCABLE = new Set(['SharePoint', 'GoogleDrive']);
+const SYNCABLE = new Set(['SharePoint', 'GoogleDrive', 'GitHub']);
+
+/** Syncable sources that need a stored token to be re-read unattended. Public GitHub repos don't. */
+const SYNC_NEEDS_CONNECTION = new Set(['SharePoint', 'GoogleDrive']);
 
 const SOURCES = ['GitHub', 'SharePoint', 'GoogleDrive', 'Local', 'AzureDevOps', 'Confluence', 'Jira'];
 
@@ -56,10 +59,11 @@ export default function AddSourceModal({
   const [token, setToken] = useState('');
 
   // GitHub
-  const [repository, setRepository] = useState('acme-ins/claims-core');
+  const [repository, setRepository] = useState('');
   const [branch, setBranch] = useState('main');
-  const [path, setPath] = useState('docs');
-  const [fileTypes, setFileTypes] = useState('md, yaml, adoc');
+  const [path, setPath] = useState('');
+  const [fileTypes, setFileTypes] = useState('');
+  const [githubToken, setGithubToken] = useState('');
   // Azure DevOps
   const [azOrg, setAzOrg] = useState('');
   const [azProject, setAzProject] = useState('');
@@ -75,8 +79,8 @@ export default function AddSourceModal({
 
   // Recurring needs somewhere to go back to and a token to go back with.
   const syncBlockedBecause = !SYNCABLE.has(source)
-    ? `${srcOf(source).label} can't be kept in sync — only SharePoint and Google Drive locations can be re-read on a schedule.`
-    : !connection
+    ? `${srcOf(source).label} can't be kept in sync — only SharePoint, Google Drive and GitHub locations can be re-read on a schedule.`
+    : !connection && SYNC_NEEDS_CONNECTION.has(source)
       ? `Connect ${srcOf(source).label} first: recurring updates run unattended and need a stored token.`
       : undefined;
   const wantsSchedule = mode === 'recurring' && !syncBlockedBecause;
@@ -116,6 +120,39 @@ export default function AddSourceModal({
     }
   };
 
+  const connectGitHub = async () => {
+    if (!githubToken.trim()) { setError('Paste a GitHub personal access token.'); return; }
+    setBusy(true);
+    setError(null);
+    try {
+      const created = await api.connect('GitHub', githubToken.trim());
+      showToast({
+        icon: '✓', dot: '#2E9A64', title: 'GitHub connected',
+        body: created.account ? `Reading repositories as ${created.account}.` : 'Token stored for this workspace.',
+      });
+      setGithubToken('');
+      invalidate();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not connect GitHub.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const disconnectGitHub = async () => {
+    if (!connection) return;
+    setBusy(true);
+    try {
+      await api.disconnect(connection.id);
+      showToast({ icon: '✓', dot: '#2E9A64', title: 'GitHub disconnected', body: 'Private repositories are no longer reachable.' });
+      invalidate();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not disconnect GitHub.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const resolveLink = async () => {
     if (!connection) { setError('Sign in first — resolving a link needs that account\'s access.'); return; }
     if (!link.trim()) { setError('Paste the link to the folder you want to import.'); return; }
@@ -148,7 +185,7 @@ export default function AddSourceModal({
 
   const describeSource = () => {
     switch (source) {
-      case 'GitHub': return `Branch ${branch}${path ? ` · /${path}` : ''}${fileTypes ? ` · ${fileTypes}` : ''}`;
+      case 'GitHub': return `${repository.trim()} · ${branch || 'main'}${path ? ` · /${path}` : ''}${fileTypes ? ` · ${fileTypes}` : ''}`;
       case 'SharePoint':
       case 'GoogleDrive': return resolved?.displayName ?? 'Linked folder';
       case 'AzureDevOps': return `${azOrg} / ${azProject} / ${azWiki}`;
@@ -160,8 +197,12 @@ export default function AddSourceModal({
     switch (source) {
       case 'GitHub':
         return {
-          reference: `${repository}@${branch}:/${path}`,
-          options: { repository, branch, path, fileTypes },
+          reference: `${repository.trim()}@${branch.trim() || 'main'}:/${path.trim()}`,
+          options: {
+            repository: repository.trim(), branch: branch.trim() || 'main', path: path.trim(),
+            // The extractor takes a list; an empty one means every file.
+            fileTypes: fileTypes.split(',').map(x => x.trim()).filter(Boolean),
+          },
         };
       case 'SharePoint':
       case 'GoogleDrive':
@@ -202,7 +243,7 @@ export default function AddSourceModal({
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(130px,1fr))', gap: 8 }}>
         {SOURCES.map(key => {
           const s = srcOf(key);
-          const isConnected = key === 'GitHub' || key === 'Local' || connections.some(x => x.sourceType === key && x.status === 'Connected');
+          const isConnected = connections.some(x => x.sourceType === key && x.status === 'Connected');
           return (
             <button
               key={key}
@@ -220,7 +261,7 @@ export default function AddSourceModal({
               }}>{s.mark}</span>
               <span style={{ fontSize: 13, fontWeight: 500, color: c.ink }}>{s.label}</span>
               <span style={{ fontSize: 11, color: isConnected ? '#1F7A4F' : '#94600F' }}>
-                {key === 'Local' ? 'Upload' : isConnected ? 'Connected' : 'Token required'}
+                {key === 'Local' ? 'Upload' : isConnected ? 'Connected' : 'Not connected'}
               </span>
             </button>
           );
@@ -322,16 +363,52 @@ export default function AddSourceModal({
 
         {!needsAuth && source === 'GitHub' && (
           <>
+            {connection ? (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 8, fontSize: 12,
+                color: '#1F7A4F', background: '#E7F4EC', borderRadius: 8, padding: '7px 10px',
+              }}>
+                <span>✓</span>
+                <span style={{ flex: 1 }}>Connected{connection.account ? ` as ${connection.account}` : ''} — private repositories it can read are reachable.</span>
+                <button
+                  onClick={() => void disconnectGitHub()}
+                  disabled={busy}
+                  style={{ border: 0, background: 'transparent', color: '#1F7A4F', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}
+                >Disconnect</button>
+              </div>
+            ) : (
+              <div style={{ border: `1px dashed ${c.borderStrong}`, borderRadius: 10, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div style={{ fontSize: 13, color: c.soft }}>
+                  <b>Not connected.</b> Public repositories work as they are. For a private one, connect with a GitHub{' '}
+                  <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noreferrer" style={{ color: c.accent }}>
+                    fine-grained personal access token</a> that has read-only <i>Contents</i> access to the repositories you need.
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <Input
+                    value={githubToken}
+                    type="password"
+                    placeholder="github_pat_…"
+                    onChange={e => setGithubToken(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') void connectGitHub(); }}
+                  />
+                  <Button disabled={busy || !githubToken.trim()} onClick={() => void connectGitHub()}>
+                    {busy ? 'Checking…' : 'Connect GitHub'}
+                  </Button>
+                </div>
+              </div>
+            )}
             <Field label="Repository">
-              <Input value={repository} onChange={e => setRepository(e.target.value)} style={{ fontFamily: "'Geist Mono', monospace" }} />
+              <Input
+                value={repository}
+                placeholder="owner/name, or https://github.com/owner/name"
+                onChange={e => setRepository(e.target.value)}
+                style={{ fontFamily: "'Geist Mono', monospace" }}
+              />
             </Field>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
-              <Field label="Branch"><Input value={branch} onChange={e => setBranch(e.target.value)} /></Field>
-              <Field label="Path"><Input value={path} onChange={e => setPath(e.target.value)} placeholder="docs" /></Field>
-              <Field label="File types"><Input value={fileTypes} onChange={e => setFileTypes(e.target.value)} /></Field>
-            </div>
-            <div style={{ fontSize: 12, color: c.dim, lineHeight: 1.5 }}>
-              Public repositories need no token. Add a GitHub connection to reach private ones.
+              <Field label="Branch"><Input value={branch} placeholder="main" onChange={e => setBranch(e.target.value)} /></Field>
+              <Field label="Folder (optional)"><Input value={path} onChange={e => setPath(e.target.value)} placeholder="whole repository" /></Field>
+              <Field label="File types (optional)"><Input value={fileTypes} onChange={e => setFileTypes(e.target.value)} placeholder="all, or e.g. md, py" /></Field>
             </div>
           </>
         )}

@@ -11,7 +11,7 @@ export default function SignIn() {
   const { signIn } = useApp();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [devEmail, setDevEmail] = useState('owner@acme-insurance.com');
+  const [devEmail, setDevEmail] = useState('');
 
   const run = async (provider: string, token: string) => {
     setBusy(true);
@@ -160,8 +160,10 @@ function startGoogle(run: (p: string, t: string) => void, onError: (m: string) =
 }
 
 /**
- * Microsoft sign-in uses the implicit ID-token flow against the v2 endpoint and
- * returns to /auth/callback, where App.tsx completes the exchange.
+ * Microsoft sign-in returns to the same /oauth/callback the source connections
+ * use. One callback path means one redirect URI to register: having two nearly
+ * identical ones is the kind of detail that costs an afternoon when only one of
+ * them is in the portal.
  */
 function startMicrosoft(_run: (p: string, t: string) => void, onError: (m: string) => void) {
   if (!MICROSOFT_CLIENT_ID) { onError('Microsoft client id is not configured.'); return; }
@@ -171,7 +173,7 @@ function startMicrosoft(_run: (p: string, t: string) => void, onError: (m: strin
   const params = new URLSearchParams({
     client_id: MICROSOFT_CLIENT_ID,
     response_type: 'id_token',
-    redirect_uri: `${window.location.origin}/auth/callback`,
+    redirect_uri: `${window.location.origin}/oauth/callback`,
     scope: 'openid profile email',
     response_mode: 'fragment',
     nonce,

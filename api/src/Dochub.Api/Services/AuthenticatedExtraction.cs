@@ -35,7 +35,12 @@ public static class AuthenticatedExtraction
                     await onTokenRejected(ct);
                 }
 
-                var label = connection?.SourceType.Label() ?? "The source";
+                if (connection is null)
+                    throw new InvalidOperationException(
+                        $"The source refused access ({(int)ex.StatusCode!} {ex.StatusCode}). " +
+                        "If it isn't public, connect an account that can read it.", ex);
+
+                var label = connection.SourceType.Label();
                 throw new InvalidOperationException(
                     $"{label} rejected the stored token ({(int)ex.StatusCode!} {ex.StatusCode}). " +
                     "Reconnect the source and try again.", ex);

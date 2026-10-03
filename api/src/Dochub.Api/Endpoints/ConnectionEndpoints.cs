@@ -62,7 +62,7 @@ public static class ConnectionEndpoints
 
     private static async Task<IResult> ConnectAsync(
         [FromBody] ConnectSourceRequest request, HttpContext http,
-        DochubDbContext db, ITokenProtector protector, CancellationToken ct)
+        DochubDbContext db, ITokenProtector protector, IHttpClientFactory httpClients, CancellationToken ct)
     {
         var orgId = http.User.RequireOrganizationId();
         var userId = http.User.UserId();
@@ -73,6 +73,17 @@ public static class ConnectionEndpoints
 
         if (string.IsNullOrWhiteSpace(request.AccessToken))
             return Results.Json(new ApiError("missing_token", "An access token is required."), statusCode: 400);
+
+        // A GitHub token is checked with GitHub before it is kept, so a typo shows up
+        // now and the connection can say which account it reads as.
+        string? account = null;
+        if (sourceType == SourceType.GitHub)
+        {
+            var check = await GitHubAccountAsync(httpClients, request.AccessToken.Trim(), ct);
+            if (check.Error is not null)
+                return Results.Json(new ApiError("invalid_token", check.Error), statusCode: 400);
+            account = check.Login;
+        }
 
         var connection = await db.SourceConnections.FirstOrDefaultAsync(
             x => x.OrganizationId == orgId && x.UserId == userId && x.SourceType == sourceType, ct);
@@ -89,7 +100,8 @@ public static class ConnectionEndpoints
         }
 
         connection.DisplayName = request.DisplayName?.Trim() is { Length: > 0 } name ? name : sourceType.Label();
-        connection.ProtectedAccessToken = protector.Protect(request.AccessToken);
+        connection.Account = account ?? connection.Account;
+        connection.ProtectedAccessToken = protector.Protect(request.AccessToken.Trim());
         connection.ProtectedRefreshToken = string.IsNullOrWhiteSpace(request.RefreshToken)
             ? connection.ProtectedRefreshToken
             : protector.Protect(request.RefreshToken);
@@ -101,6 +113,30 @@ public static class ConnectionEndpoints
         await db.SaveChangesAsync(ct);
 
         return Results.Ok(ToDto(connection));
+    }
+
+    private static async Task<(string? Login, string? Error)> GitHubAccountAsync(
+        IHttpClientFactory httpClients, string token, CancellationToken ct)
+    {
+        var client = httpClients.CreateClient("github");
+        using var request = new HttpRequestMessage(HttpMethod.Get, "user");
+        request.Headers.Authorization = new("Bearer", token);
+        request.Headers.Accept.Clear();
+        request.Headers.Accept.ParseAdd("application/vnd.github+json");
+        try
+        {
+            using var response = await client.SendAsync(request, ct);
+            if (response.StatusCode is System.Net.HttpStatusCode.Unauthorized)
+                return (null, "GitHub rejected that token. Check it was copied whole and hasn't expired.");
+            if (!response.IsSuccessStatusCode)
+                return (null, $"GitHub answered {(int)response.StatusCode} when checking the token.");
+            using var body = System.Text.Json.JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+            return (body.RootElement.TryGetProperty("login", out var login) ? login.GetString() : null, null);
+        }
+        catch (HttpRequestException e)
+        {
+            return (null, $"Could not reach GitHub to check the token: {e.Message}");
+        }
     }
 
     private static async Task<IResult> StartOAuthAsync(

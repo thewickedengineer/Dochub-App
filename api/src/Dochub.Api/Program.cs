@@ -9,6 +9,7 @@ using Dochub.Api.Services;
 using Dochub.Api.Workers;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi;
 
@@ -23,7 +24,8 @@ builder.Services.Configure<OAuthOptions>(builder.Configuration.GetSection(OAuthO
 builder.Services.Configure<PipelineOptions>(builder.Configuration.GetSection(PipelineOptions.Section));
 builder.Services.Configure<SyncOptions>(builder.Configuration.GetSection(SyncOptions.Section));
 builder.Services.Configure<ExtractorOptions>(builder.Configuration.GetSection(ExtractorOptions.Section));
-builder.Services.Configure<VectorServiceOptions>(builder.Configuration.GetSection(VectorServiceOptions.Section));
+builder.Services.Configure<IngestionOptions>(builder.Configuration.GetSection(IngestionOptions.Section));
+builder.Services.Configure<RagOptions>(builder.Configuration.GetSection(RagOptions.Section));
 
 // Fail here rather than at the first click: a bad reply address surfaces from the
 // provider as an opaque code (AADSTS900971) that points nowhere near the cause.
@@ -122,7 +124,6 @@ builder.Services.AddSingleton<ISourceExtractor, AzureDevOpsExtractor>();
 builder.Services.AddSingleton<ISourceExtractorFactory, SourceExtractorFactory>();
 
 builder.Services.AddHostedService<ExtractorWorker>();
-builder.Services.AddHostedService<VectorServiceSimulator>();
 builder.Services.AddHostedService<RecurringSyncWorker>();
 
 builder.Services.AddHttpClient("github", c =>
@@ -135,6 +136,17 @@ builder.Services.AddHttpClient("graph", c => c.BaseAddress = new Uri("https://gr
 builder.Services.AddHttpClient("gdrive", c => c.BaseAddress = new Uri("https://www.googleapis.com/drive/v3/"));
 builder.Services.AddHttpClient("azdo", c => c.BaseAddress = new Uri("https://dev.azure.com/"));
 builder.Services.AddHttpClient("oauth");
+// No client-side timeout: an answer streams for as long as Rag:TimeoutSeconds allows.
+builder.Services.AddHttpClient("rag", (sp, c) =>
+{
+    var baseUrl = sp.GetRequiredService<IOptions<RagOptions>>().Value.BaseUrl.TrimEnd('/') + "/";
+    c.BaseAddress = new Uri(baseUrl);
+    c.Timeout = Timeout.InfiniteTimeSpan;
+});
+builder.Services.AddSingleton<IRagChatClient, RagChatClient>();
+builder.Services.AddSingleton<IRagPurgeClient, RagPurgeClient>();
+builder.Services.AddScoped<UploadRemovalService>();
+builder.Services.AddScoped<ChatService>();
 
 builder.Services.AddSignalR();
 builder.Services.ConfigureHttpJsonOptions(options =>
@@ -240,6 +252,9 @@ app.MapProcessEndpoints();
 app.MapConnectionEndpoints();
 app.MapNotificationEndpoints();
 app.MapSyncScheduleEndpoints();
+app.MapIngestionEndpoints();
+app.MapChatEndpoints();
+app.MapPlatformEndpoints();
 app.MapHub<NotificationHub>("/hubs/notifications");
 app.MapHealthChecks("/health");
 
@@ -252,6 +267,28 @@ app.Lifetime.ApplicationStarted.Register(() =>
     var address = app.Urls.FirstOrDefault() ?? "http://localhost:5080";
     app.Logger.LogInformation("Dochub API ready — Swagger UI at {Swagger}, OpenAPI at {Spec}, health at {Health}",
         $"{address}/swagger", $"{address}/swagger/v1/swagger.json", $"{address}/health");
+
+    // Printed in brackets so a stray space or trailing slash is visible: this
+    // string must match a registered redirect URI byte for byte.
+    if (oauthOptions.Google.IsConfigured || oauthOptions.Microsoft.IsConfigured)
+        app.Logger.LogInformation(
+            "OAuth reply address is [{RedirectUri}] — register exactly this, with no trailing slash",
+            oauthOptions.RedirectUri);
+
+    // Which ways in actually work, so a missing client id shows up here rather
+    // than at the end of somebody's sign-in.
+    var sso = app.Services.GetRequiredService<IOptions<SsoOptions>>().Value.ResolvedAgainst(oauthOptions);
+    var methods = new List<string>();
+    if (!string.IsNullOrWhiteSpace(sso.GoogleClientId)) methods.Add("Google");
+    if (!string.IsNullOrWhiteSpace(sso.MicrosoftClientId)) methods.Add($"Microsoft (tenant {sso.MicrosoftTenant})");
+    if (sso.AllowDevSignIn) methods.Add("dev sign-in");
+
+    if (methods.Count == 0)
+        app.Logger.LogWarning(
+            "No way to sign in: set Sso:GoogleClientId or Sso:MicrosoftClientId (or the matching " +
+            "OAuth client id), or turn on Sso:AllowDevSignIn for local work.");
+    else
+        app.Logger.LogInformation("Sign-in available via {Methods}", string.Join(", ", methods));
 });
 
 app.Run();

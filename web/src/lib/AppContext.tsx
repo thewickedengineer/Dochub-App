@@ -25,6 +25,8 @@ interface AppState {
   refreshSession: () => Promise<void>;
   refreshNotifications: () => Promise<void>;
   markNotificationsRead: () => Promise<void>;
+  /** Hides notifications for this user only; omit the id to clear them all. */
+  clearNotifications: (id?: string) => Promise<void>;
   showToast: (toast: Omit<Toast, 'id'>) => void;
   invalidate: () => void;
 }
@@ -92,6 +94,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
     applySession(await api.me());
   }, [applySession]);
 
+  const clearNotifications = useCallback(async (id?: string) => {
+    // Optimistic: the list updates at once, and a failure brings the server's view back.
+    setNotifications(current => (id ? current.filter(n => n.id !== id) : []));
+    try {
+      if (id) await api.clearNotification(id); else await api.clearNotifications();
+    } catch {
+      void refreshNotifications();
+    }
+  }, [refreshNotifications]);
+
   const markNotificationsRead = useCallback(async () => {
     setUnread(0);
     try { await api.markRead(); } catch { /* the badge clears locally regardless */ }
@@ -149,10 +161,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const value = useMemo<AppState>(() => ({
     ready, user, organization, organizations, notifications, unread, toasts, revision,
     signIn, signOut, switchOrganization, refreshSession, refreshNotifications,
-    markNotificationsRead, showToast, invalidate,
+    markNotificationsRead, clearNotifications, showToast, invalidate,
   }), [ready, user, organization, organizations, notifications, unread, toasts, revision,
     signIn, signOut, switchOrganization, refreshSession, refreshNotifications,
-    markNotificationsRead, showToast, invalidate]);
+    markNotificationsRead, clearNotifications, showToast, invalidate]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

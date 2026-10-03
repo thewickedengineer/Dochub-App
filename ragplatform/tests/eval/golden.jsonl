@@ -1,0 +1,24 @@
+{"id": "q01", "kind": "identifier", "query": "territory_factor", "expect": [{"file": "rating.py", "contains": "def territory_factor"}]}
+{"id": "q02", "kind": "identifier", "query": "AcknowledgeAsync", "expect": [{"file": "FnolService.cs", "contains": "AcknowledgeAsync"}]}
+{"id": "q03", "kind": "identifier", "query": "CLM-1004 reserve", "expect": [{"file": "claims-register.xlsx", "contains": "CLM-1004"}, {"file": "reserves.csv", "contains": "CLM-1004"}]}
+{"id": "q04", "kind": "identifier", "query": "BASE_RATE 412", "expect": [{"file": "rating.py", "contains": "412"}]}
+{"id": "q05", "kind": "paraphrase", "query": "how quickly must a personal lines claim be acknowledged", "expect": [{"file": "README.md", "contains": "24 hours"}]}
+{"id": "q06", "kind": "paraphrase", "query": "how is the premium calculated from the driver score", "expect": [{"file": "rating.py", "contains": "def premium"}]}
+{"id": "q07", "kind": "paraphrase", "query": "what happens to claims that nobody acknowledged in time", "expect": [{"file": "README.md", "contains": "escalate to the duty manager"}]}
+{"id": "q08", "kind": "paraphrase", "query": "when are initial reserves set", "expect": [{"file": "notes.txt", "contains": "five working days"}]}
+{"id": "q09", "kind": "paraphrase", "query": "who handles very large losses", "expect": [{"file": "notes.txt", "contains": "large loss unit"}]}
+{"id": "q10", "kind": "paraphrase", "query": "settlement limit for a grade G12 handler", "expect": [{"file": "claims-guide.docx", "contains": "| G12"}]}
+{"id": "q11", "kind": "paraphrase", "query": "from which grade is a countersignature needed", "expect": [{"file": "claims-guide.docx", "contains": "| G30"}]}
+{"id": "q12", "kind": "paraphrase", "query": "what documents must a claimant provide", "expect": [{"file": "claims-guide.docx", "contains": "Photographs of the damage"}]}
+{"id": "q13", "kind": "paraphrase", "query": "what should a handler do with a claim above their authority", "expect": [{"file": "claims-guide.docx", "contains": "referred to the duty manager"}]}
+{"id": "q14", "kind": "paraphrase", "query": "signs that a claim might be fraudulent", "expect": [{"file": "fraud-training.pptx", "contains": "Late notification"}]}
+{"id": "q15", "kind": "paraphrase", "query": "where do we send suspected fraud and how fast", "expect": [{"file": "fraud-training.pptx", "contains": "special investigations unit"}]}
+{"id": "q16", "kind": "paraphrase", "query": "how long are claim files retained", "expect": [{"file": "privacy-notice.html", "contains": "10 years"}]}
+{"id": "q17", "kind": "paraphrase", "query": "can a customer ask us to delete their personal data", "expect": [{"file": "privacy-notice.html", "contains": "delete"}]}
+{"id": "q18", "kind": "paraphrase", "query": "is mechanical breakdown covered by the motor policy", "expect": [{"file": "motor-policy.pdf", "contains": "mechanical failure"}]}
+{"id": "q19", "kind": "paraphrase", "query": "deadline for telling the insurer about an accident", "expect": [{"file": "motor-policy.pdf", "contains": "seven days"}]}
+{"id": "q20", "kind": "paraphrase", "query": "what did the witness see", "expect": [{"file": "witness-statement-scan.pdf", "contains": "blue van"}]}
+{"id": "q21", "kind": "paraphrase", "query": "which claim number was opened on the phone call", "expect": [{"file": "fnol-call.mp3", "contains": "1005"}]}
+{"id": "q22", "kind": "paraphrase", "query": "how do I run the claims service on my machine", "expect": [{"file": "README.md", "contains": "docker compose up"}]}
+{"id": "q23", "kind": "paraphrase", "query": "base rate for motor rating in rural areas", "expect": [{"file": "rating.py", "contains": "rural"}]}
+{"id": "q24", "kind": "paraphrase", "query": "acknowledgement deadline for commercial claims", "expect": [{"file": "README.md", "contains": "2 business days"}]}

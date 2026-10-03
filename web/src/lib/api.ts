@@ -1,5 +1,6 @@
 import type {
-  ArtifactDetailDto, ArtifactSummaryDto, AuthResponse, KnowledgeBaseDto, MemberDto,
+  ArtifactDetailDto, ArtifactSummaryDto, AuthResponse, ChatConversationDetailDto, ChatConversationDto,
+  ChatEvent, ChatScope, KnowledgeBaseDto, MemberDto, OwnerDto, PlatformOrganizationDto,
   NotificationListDto, OrganizationDto, PendingSource, ProcessAcknowledgement,
   ResolvedLinkDto, SourceConnectionDto, SourceDocumentDetailDto, SourceDocumentDto,
   StagedFileDto, StartOAuthResponse, SyncScheduleDto, SyncScheduleRequest, SyncRunResult, TeamDto,
@@ -49,6 +50,39 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 const json = (body: unknown) => JSON.stringify(body);
 
+/**
+ * POSTs and reads a server-sent event stream. EventSource cannot send a body or
+ * an Authorization header, so this parses the `data:` lines from fetch itself.
+ */
+async function stream(path: string, body: unknown, onEvent: (event: ChatEvent) => void, signal?: AbortSignal) {
+  const token = tokenStore.get();
+  const response = await fetch(`${BASE}${path}`, {
+    method: 'POST', body: json(body), signal,
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+  });
+  if (!response.ok || !response.body) {
+    const payload = await response.json().catch(() => null);
+    if (response.status === 401) tokenStore.clear();
+    throw new ApiError(response.status, payload?.code ?? 'error', payload?.message ?? `Request failed with ${response.status}.`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let end: number;
+    while ((end = buffer.indexOf('\n\n')) >= 0) {
+      const frame = buffer.slice(0, end);
+      buffer = buffer.slice(end + 2);
+      for (const line of frame.split('\n')) {
+        if (line.startsWith('data: ')) onEvent(JSON.parse(line.slice(6)) as ChatEvent);
+      }
+    }
+  }
+}
+
 export const api = {
   baseUrl: BASE,
 
@@ -61,8 +95,19 @@ export const api = {
 
   // Organizations
   organizations: () => request<OrganizationDto[]>('/api/organizations'),
-  createOrganization: (name: string, plan?: string) =>
-    request<OrganizationDto>('/api/organizations', { method: 'POST', body: json({ name, plan }) }),
+  /** ownerLoginId: the address the owner signs in with; omit to be the owner yourself. */
+  createOrganization: (name: string, ownerLoginId?: string, ownerDisplayName?: string) =>
+    request<OrganizationDto>('/api/organizations', {
+      method: 'POST', body: json({ name, ownerLoginId: ownerLoginId || undefined, ownerDisplayName: ownerDisplayName || undefined }),
+    }),
+
+  // Platform (Creator only)
+  platformOrganizations: () => request<PlatformOrganizationDto[]>('/api/platform/organizations'),
+  addOwner: (organizationId: string, loginId: string, displayName?: string) =>
+    request<OwnerDto>(`/api/platform/organizations/${organizationId}/owners`,
+      { method: 'POST', body: json({ loginId, displayName: displayName || undefined }) }),
+  removeOwner: (organizationId: string, userId: string) =>
+    request<void>(`/api/platform/organizations/${organizationId}/owners/${userId}`, { method: 'DELETE' }),
   members: () => request<MemberDto[]>('/api/organizations/current/members'),
   addMember: (email: string, role: string) =>
     request<MemberDto>('/api/organizations/current/members', { method: 'POST', body: json({ email, role }) }),
@@ -116,6 +161,11 @@ export const api = {
 
   sourceDocument: (id: string) => request<SourceDocumentDetailDto>(`/api/source-documents/${id}`),
 
+  /** Remove a failed upload: its index entries, files and rows. Safe to call again if it stopped partway. */
+  removeSourceDocument: (id: string) =>
+    request<{ reference: string; documentsRemoved: number; documentsRestored: number; blobsDeleted: number; reindexed: number }>(
+      `/api/source-documents/${id}`, { method: 'DELETE' }),
+
   retrySourceDocument: (id: string) =>
     request<{ reference: string; message: string }>(`/api/source-documents/${id}/retry`, { method: 'POST' }),
 
@@ -146,12 +196,28 @@ export const api = {
       method: 'POST', body: json({ link, sourceConnectionId }),
     }),
 
+  disconnect: (connectionId: string) => request<void>(`/api/connections/${connectionId}`, { method: 'DELETE' }),
+
   connect: (sourceType: string, accessToken: string, extra?: { scopes?: string; expiresAt?: string }) =>
     request<SourceConnectionDto>('/api/connections',
       { method: 'POST', body: json({ sourceType, accessToken, ...extra }) }),
 
+  // Chat
+  conversations: () => request<ChatConversationDto[]>('/api/chat/conversations'),
+  conversation: (id: string) => request<ChatConversationDetailDto>(`/api/chat/conversations/${id}`),
+  createConversation: (scope: ChatScope, scopeId?: string, title?: string) =>
+    request<ChatConversationDto>('/api/chat/conversations', { method: 'POST', body: json({ scope, scopeId, title }) }),
+  updateConversation: (id: string, body: { title?: string; scope?: ChatScope; scopeId?: string }) =>
+    request<ChatConversationDto>(`/api/chat/conversations/${id}`, { method: 'PATCH', body: json(body) }),
+  deleteConversation: (id: string) => request<void>(`/api/chat/conversations/${id}`, { method: 'DELETE' }),
+  /** Streams the answer: started, sources, delta…, done — or error. */
+  ask: (id: string, content: string, onEvent: (event: ChatEvent) => void, signal?: AbortSignal) =>
+    stream(`/api/chat/conversations/${id}/messages`, { content }, onEvent, signal),
+
   // Notifications
   notifications: (limit = 50) => request<NotificationListDto>(`/api/notifications?limit=${limit}`),
+  clearNotification: (id: string) => request<void>(`/api/notifications/${id}`, { method: 'DELETE' }),
+  clearNotifications: () => request<{ cleared: number }>('/api/notifications', { method: 'DELETE' }),
   markRead: (ids?: string[]) =>
     request<{ markedRead: number }>('/api/notifications/read', { method: 'POST', body: json(ids ?? null) }),
 };

@@ -1,0 +1,6 @@
+Reserve setting guidance.
+
+Initial reserves are set within five working days of the claim being reported.
+They are reviewed whenever new information materially changes the expected cost.
+
+Large losses above 250,000 are referred to the large loss unit.

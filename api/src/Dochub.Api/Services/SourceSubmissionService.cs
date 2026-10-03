@@ -65,6 +65,7 @@ public class SourceSubmissionService(
             TotalDocuments = submission.DeclaredDocuments.Count
         };
         db.SourceDocuments.Add(source);
+        artifact.Status = ArtifactStatus.Pending;
 
         // Local files are known up front, so their rows exist before extraction
         // and the caller sees a document list immediately.

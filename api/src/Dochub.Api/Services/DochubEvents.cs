@@ -60,7 +60,9 @@ public record DocumentsProcessRequestedEvent(
     string BlobPrefix,
     int DocumentCount,
     DateTimeOffset UploadedAt,
-    IReadOnlyList<ProcessableDocument> Documents);
+    IReadOnlyList<ProcessableDocument> Documents,
+    /// <summary>Documents a sync found deleted at the source: the index drops them.</summary>
+    IReadOnlyList<Guid>? RemovedDocumentIds = null);
 
 public record ProcessableDocument(
     Guid DocumentId,
@@ -71,4 +73,10 @@ public record ProcessableDocument(
     long SizeBytes,
     string? ContentType,
     string? ChecksumSha256,
-    int Revision);
+    int Revision,
+    /// <summary>Content-MD5 storage returned for this exact blob, base64.</summary>
+    string ContentMd5,
+    /// <summary>The document_versions row this message describes.</summary>
+    Guid DocumentVersionId,
+    string SourceType,
+    string? ExternalId);

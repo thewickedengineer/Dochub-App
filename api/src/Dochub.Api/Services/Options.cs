@@ -38,14 +38,40 @@ public class JwtOptions
 public class SsoOptions
 {
     public const string Section = "Sso";
+
+    /// <summary>
+    /// The client id an ID token's audience must match. Leave empty to reuse
+    /// <c>OAuth:Google:ClientId</c> — the usual case, where one app registration
+    /// both signs people in and reads their documents.
+    /// </summary>
     public string? GoogleClientId { get; set; }
+
+    /// <summary>Same idea; falls back to <c>OAuth:Microsoft:ClientId</c>.</summary>
     public string? MicrosoftClientId { get; set; }
-    public string MicrosoftTenant { get; set; } = "common";
+
+    /// <summary>Falls back to <c>OAuth:Microsoft:Tenant</c>.</summary>
+    public string? MicrosoftTenant { get; set; }
+
     /// <summary>
     /// Development escape hatch: accept an unverified identity so the UI can be
     /// driven without registering real Google/Microsoft OAuth apps.
     /// </summary>
     public bool AllowDevSignIn { get; set; }
+
+    /// <summary>
+    /// Resolves each setting against the OAuth section, so a single registration
+    /// needs configuring once rather than in two places that must agree.
+    /// </summary>
+    public SsoOptions ResolvedAgainst(OAuthOptions oauth) => new()
+    {
+        GoogleClientId = Pick(GoogleClientId, oauth.Google.ClientId),
+        MicrosoftClientId = Pick(MicrosoftClientId, oauth.Microsoft.ClientId),
+        MicrosoftTenant = Pick(MicrosoftTenant, oauth.Microsoft.Tenant) ?? "common",
+        AllowDevSignIn = AllowDevSignIn
+    };
+
+    private static string? Pick(string? preferred, string? fallback) =>
+        string.IsNullOrWhiteSpace(preferred) ? (string.IsNullOrWhiteSpace(fallback) ? null : fallback) : preferred;
 }
 
 public class PipelineOptions
@@ -81,17 +107,6 @@ public class ExtractorOptions
     public int IdlePollSeconds { get; set; } = 2;
 }
 
-public class VectorServiceOptions
-{
-    public const string Section = "VectorService";
-    /// <summary>
-    /// Stands in for the Python vector service by consuming the process queue and
-    /// marking documents indexed. Turn this off the moment the real one is running,
-    /// or the two will race for the same messages.
-    /// </summary>
-    public bool SimulateLocally { get; set; }
-    public int SimulatedSecondsPerDocument { get; set; } = 2;
-}
 
 /// <summary>
 /// Delegated OAuth for the document sources. This is separate from
@@ -158,3 +173,35 @@ public class OAuthProviderOptions
 
 /// <summary>The identity provider behind a source, as opposed to the source itself.</summary>
 public enum SourceProvider { Google, Microsoft }
+
+public class IngestionOptions
+{
+    public const string Section = "Ingestion";
+
+    /// <summary>
+    /// Shared secret the vector service presents on its callbacks, in the
+    /// X-Dochub-Service-Key header. Those calls come from a service, not a
+    /// signed-in person, so they cannot use the user JWT.
+    /// </summary>
+    public string? ServiceKey { get; set; }
+
+    public bool IsConfigured => !string.IsNullOrWhiteSpace(ServiceKey) && ServiceKey!.Length >= 32;
+}
+
+
+public class RagOptions
+{
+    public const string Section = "Rag";
+
+    /// <summary>The RAG platform's API (rag-ingest api). Calls carry Ingestion:ServiceKey.</summary>
+    public string BaseUrl { get; set; } = "http://localhost:8090";
+
+    /// <summary>Upper bound on a purge call when an upload is removed.</summary>
+    public int PurgeTimeoutSeconds { get; set; } = 60;
+
+    /// <summary>Upper bound on one chat answer, retrieval and generation together.</summary>
+    public int TimeoutSeconds { get; set; } = 180;
+
+    /// <summary>Earlier turns sent with each question, so follow-ups can be understood.</summary>
+    public int HistoryMessages { get; set; } = 12;
+}

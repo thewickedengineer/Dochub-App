@@ -12,14 +12,26 @@ public record AuthResponse(
 
 public record UserDto(
     Guid Id, string Email, string DisplayName, string? AvatarUrl,
-    string IdentityProvider, bool CanCreateOrganizations, string? Role);
+    string IdentityProvider, bool CanCreateOrganizations, string? Role, bool IsCreator = false);
 
 public record SwitchOrganizationRequest(Guid OrganizationId);
 
 // ── Organization ──────────────────────────────────────────────────────────────
 public record OrganizationDto(Guid Id, string Name, string Slug, string Initials, string Plan, string Role, int MemberCount);
 
-public record CreateOrganizationRequest(string Name, string? Plan);
+/// <summary>
+/// <paramref name="OwnerLoginId"/> is the owner's sign-in name — the address they
+/// sign in with to Microsoft (work, school or personal account) or Google. Empty
+/// makes the caller the owner.
+/// </summary>
+public record CreateOrganizationRequest(string Name, string? Plan, string? OwnerLoginId = null, string? OwnerDisplayName = null);
+
+// ── Platform (Creator) ────────────────────────────────────────────────────────
+public record OwnerDto(Guid UserId, string LoginId, string DisplayName, string IdentityProvider, bool HasSignedIn);
+public record PlatformOrganizationDto(
+    Guid Id, string Name, string Slug, string Initials, string Plan, int MemberCount,
+    IReadOnlyList<OwnerDto> Owners, string? CreatedBy, DateTimeOffset CreatedAt);
+public record AddOwnerRequest(string LoginId, string? DisplayName);
 
 public record MemberDto(
     Guid UserId, string Name, string Email, string Role, string IdentityProvider,
@@ -41,7 +53,9 @@ public record ArtifactSummaryDto(
     Guid Id, string Name, string Slug, string Category, string PrimarySource,
     Guid GroupId, string GroupName, Guid TeamId, string TeamName,
     int TotalDocuments, int IndexedDocuments, int PendingDocuments,
-    int ProcessingDocuments, int FailedDocuments, string Status);
+    int ProcessingDocuments, int FailedDocuments, string Status,
+    /// <summary>Stored artifact status, set by the RAG platform's artifact callback.</summary>
+    string ProcessingStatus, DateTimeOffset? LastProcessedAt);
 
 public record ArtifactDetailDto(
     ArtifactSummaryDto Artifact, IReadOnlyList<DocumentDto> Documents, IReadOnlyList<SourceDocumentDto> Sources);
@@ -87,7 +101,9 @@ public record DocumentDto(
     string SourceType, string Status, long SizeBytes, string? ContentType,
     string? BlobPath, string? BlobUrl, DateTimeOffset? BlobUploadedAt,
     string? Error, int Revision, DateTimeOffset? LastSyncedAt,
-    DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt);
+    DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt,
+    /// <summary>Base64 MD5 Azure returned for the current blob.</summary>
+    string? ContentMd5, int? ChunkCount, DateTimeOffset? ProcessedAt);
 
 public record StagedFileDto(
     string StagingId, string Name, string? RelativePath, long SizeBytes, string? ContentType);
@@ -163,3 +179,19 @@ public record NotificationListDto(IReadOnlyList<NotificationDto> Items, int Unre
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 public record ApiError(string Code, string Message, [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] object? Details = null);
+
+// ── Chat ──────────────────────────────────────────────────────────────────────
+/// <summary>Scope is Organization (default), Team, Group or Artifact; ScopeId names the latter three.</summary>
+public record CreateChatConversationRequest(string? Title, string? Scope, Guid? ScopeId);
+public record UpdateChatConversationRequest(string? Title, string? Scope, Guid? ScopeId);
+public record SendChatMessageRequest(string Content);
+
+public record ChatConversationDto(
+    Guid Id, string Title, string Scope, Guid? ScopeId, string ScopeLabel,
+    DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt);
+
+public record ChatMessageDto(
+    Guid Id, string Role, string Content, System.Text.Json.JsonElement? Sources, int[]? Cited,
+    string? Model, string? Error, DateTimeOffset CreatedAt);
+
+public record ChatConversationDetailDto(ChatConversationDto Conversation, IReadOnlyList<ChatMessageDto> Messages);

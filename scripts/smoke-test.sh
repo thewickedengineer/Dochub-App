@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 # Verifies the API is up and the whole pipeline actually works.
 #   ./scripts/smoke-test.sh [base-url]
+#
+# Signs in (dev sign-in) as SMOKE_EMAIL, defaulting to the first address in
+# Database:Administrators. Nothing is seeded any more, so that account must belong to
+# an organization with at least one artifact — create one in the UI first.
 set -uo pipefail
 
 BASE="${1:-http://localhost:5080}"
+RAG="${RAG_URL:-http://localhost:8090}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SMOKE_EMAIL="${SMOKE_EMAIL:-$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("Database",{}).get("Administrators") or [""])[0])' \
+  "$ROOT/api/src/Dochub.Api/appsettings.Development.json" 2>/dev/null)}"
 PASS=0
 FAIL=0
 
@@ -56,13 +64,17 @@ fi
 # ── 3. Auth ───────────────────────────────────────────────────────────────────
 echo
 echo "Auth"
+if [ -z "$SMOKE_EMAIL" ]; then
+  red "  FAIL  no account to sign in as — set SMOKE_EMAIL or Database:Administrators"
+  exit 1
+fi
 TOKEN=$(curl -s -X POST "$BASE/api/auth/sso" \
   -H 'Content-Type: application/json' \
-  -d '{"provider":"dev","idToken":"owner@acme-insurance.com|Dana Whitfield"}' \
+  -d "{\"provider\":\"dev\",\"idToken\":\"$SMOKE_EMAIL\"}" \
   | python3 -c 'import sys,json; print(json.load(sys.stdin).get("accessToken",""))' 2>/dev/null)
 
 if [ -z "$TOKEN" ]; then
-  red "  FAIL  could not sign in (is Sso:AllowDevSignIn true? is the database seeded?)"
+  red "  FAIL  could not sign in as $SMOKE_EMAIL (is Sso:AllowDevSignIn true?)"
   exit 1
 fi
 green "  PASS  dev sign-in issued a token"
@@ -79,7 +91,8 @@ ARTIFACT=$(curl -s "${AUTH[@]}" "$BASE/api/artifacts" \
   | python3 -c 'import sys,json; a=json.load(sys.stdin); print(a[0]["id"] if a else "")')
 
 if [ -z "$ARTIFACT" ]; then
-  red "  FAIL  no artifacts — set Database:Seed=true, or create a team/group/artifact"
+  red "  FAIL  $SMOKE_EMAIL sees no artifacts — create an organization, team, group and"
+  red "        artifact in the UI first (nothing is seeded)"
   exit 1
 fi
 
@@ -127,17 +140,52 @@ done
 
 case "$FINAL" in
   Processed)
-    green "  PASS  reached Processed — extractor and vector service both ran"
+    green "  PASS  reached Processed — extractor and RAG worker both ran"
     PASS=$((PASS + 1)) ;;
   Uploaded)
-    green "  PASS  reached Uploaded — files are in blob storage and on the process queue"
-    echo   "        (still Uploaded because no vector service is consuming it — expected"
-    echo   "         when VectorService:SimulateLocally is false and Python is not running)"
-    PASS=$((PASS + 1)) ;;
+    red   "  FAIL  stuck at Uploaded — files are in blob storage and on the process queue,"
+    red   "        but no RAG worker is consuming it. Start it: cd ragplatform && rag-ingest worker"
+    FAIL=$((FAIL + 1)) ;;
   *)
     red   "  FAIL  stalled at '${FINAL:-unknown}' — check the API log"
     FAIL=$((FAIL + 1)) ;;
 esac
+
+# ── 5. The RAG platform ───────────────────────────────────────────────────────
+echo
+echo "RAG platform"
+if [ "$(status --max-time 5 "$RAG/health")" = "200" ]; then
+  green "  PASS  rag-ingest api healthy at $RAG"
+  PASS=$((PASS + 1))
+  # The organization is the tenant; membership of it is the principal the adapter grants.
+  ORG=$(python3 -c 'import sys,json,base64; p=sys.argv[1].split(".")[1]; print(json.loads(base64.urlsafe_b64decode(p+"="*(-len(p)%4)))["org_id"])' "$TOKEN")
+  # Search is service-to-service: it needs the key the API and the RAG platform share.
+  SERVICE_KEY="${SERVICE_KEY:-$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("Ingestion",{}).get("ServiceKey",""))' \
+    "$ROOT/api/src/Dochub.Api/appsettings.Development.json" 2>/dev/null)}"
+  HITS=$(curl -s -X POST "$RAG/search" -H 'Content-Type: application/json' -H "X-Dochub-Service-Key: $SERVICE_KEY" \
+    -d "{\"tenant_id\":\"$ORG\",\"principals\":[\"org:$ORG\"],\"query\":\"Smoke test document\",\"top_k\":3,\"filters\":{\"artifact_id\":\"$ARTIFACT\"}}" \
+    | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))' 2>/dev/null)
+  check "search finds the smoke document" "yes" "$([ "${HITS:-0}" -gt 0 ] && echo yes || echo no)"
+else
+  red   "  FAIL  rag-ingest api not answering at $RAG — cd ragplatform && rag-ingest api"
+  FAIL=$((FAIL + 1))
+fi
+
+# ── 6. Chat through the API ──────────────────────────────────────────────────
+echo
+echo "Chat"
+CONV=$(curl -s -X POST "$BASE/api/chat/conversations" "${AUTH[@]}" -H 'Content-Type: application/json' \
+  -d "{\"scope\":\"Artifact\",\"scopeId\":\"$ARTIFACT\"}" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id",""))' 2>/dev/null)
+if [ -z "$CONV" ]; then
+  red "  FAIL  could not start a conversation"
+  FAIL=$((FAIL + 1))
+else
+  EVENTS=$(curl -sN -X POST "$BASE/api/chat/conversations/$CONV/messages" "${AUTH[@]}" \
+    -H 'Content-Type: application/json' -d '{"content":"Smoke test document"}' \
+    | python3 -c 'import sys,json,itertools; t=[json.loads(l[6:])["type"] for l in sys.stdin if l.startswith("data: ")]; print(" ".join(k for k,_ in itertools.groupby(t)))')
+  check "chat streams sources and an answer" "started sources delta done" "$EVENTS"
+  curl -s -o /dev/null -X DELETE "$BASE/api/chat/conversations/$CONV" "${AUTH[@]}"
+fi
 
 echo
 if [ "$FAIL" -eq 0 ]; then

@@ -76,7 +76,7 @@ export default function ScheduledUpdates() {
             {!loading && schedules.length === 0 && (
               <Empty>
                 Nothing on a schedule yet. Choose “Import and keep in sync” when adding a
-                SharePoint or Google Drive location.
+                SharePoint, Google Drive or GitHub location.
               </Empty>
             )}
 

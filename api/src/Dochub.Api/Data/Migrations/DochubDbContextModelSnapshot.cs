@@ -56,6 +56,10 @@ namespace Dochub.Api.Data.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("group_id");
 
+                    b.Property<DateTimeOffset?>("LastProcessedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("last_processed_at");
+
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(200)
@@ -72,12 +76,233 @@ namespace Dochub.Api.Data.Migrations
                         .HasColumnType("character varying(200)")
                         .HasColumnName("slug");
 
+                    b.Property<int>("Status")
+                        .HasColumnType("integer")
+                        .HasColumnName("status");
+
                     b.HasKey("Id");
 
                     b.HasIndex("GroupId", "Name")
                         .IsUnique();
 
                     b.ToTable("artifacts", "dochub");
+                });
+
+            modelBuilder.Entity("Dochub.Api.Domain.ChatConversation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid>("OrganizationId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("organization_id");
+
+                    b.Property<int>("Scope")
+                        .HasColumnType("integer")
+                        .HasColumnName("scope");
+
+                    b.Property<Guid?>("ScopeId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("scope_id");
+
+                    b.Property<string>("ScopeLabel")
+                        .IsRequired()
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)")
+                        .HasColumnName("scope_label");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("title");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OrganizationId", "UserId", "UpdatedAt");
+
+                    b.ToTable("chat_conversations", "dochub");
+                });
+
+            modelBuilder.Entity("Dochub.Api.Domain.ChatMessage", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<string>("Cited")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("cited");
+
+                    b.Property<string>("Content")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("content");
+
+                    b.Property<Guid>("ConversationId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("conversation_id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("Error")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)")
+                        .HasColumnName("error");
+
+                    b.Property<string>("Model")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("model");
+
+                    b.Property<int>("Role")
+                        .HasColumnType("integer")
+                        .HasColumnName("role");
+
+                    b.Property<string>("Sources")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("sources");
+
+                    b.Property<string>("Usage")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("usage");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ConversationId", "CreatedAt");
+
+                    b.ToTable("chat_messages", "dochub");
+                });
+
+            modelBuilder.Entity("Dochub.Api.Domain.DocumentVersion", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<Guid>("ArtifactId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("artifact_id");
+
+                    b.Property<string>("BlobContainer")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("blob_container");
+
+                    b.Property<string>("BlobETag")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("blob_etag");
+
+                    b.Property<DateTimeOffset>("BlobLastModified")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("blob_last_modified");
+
+                    b.Property<string>("BlobPath")
+                        .IsRequired()
+                        .HasMaxLength(1200)
+                        .HasColumnType("character varying(1200)")
+                        .HasColumnName("blob_path");
+
+                    b.Property<string>("BlobUrl")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)")
+                        .HasColumnName("blob_url");
+
+                    b.Property<string>("ContentMd5")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("content_md5");
+
+                    b.Property<string>("ContentSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("content_sha256");
+
+                    b.Property<string>("ContentType")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("content_type");
+
+                    b.Property<string>("ExternalId")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("external_id");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("name");
+
+                    b.Property<string>("RelativePath")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("relative_path");
+
+                    b.Property<int>("Revision")
+                        .HasColumnType("integer")
+                        .HasColumnName("revision");
+
+                    b.Property<long>("SizeBytes")
+                        .HasColumnType("bigint")
+                        .HasColumnName("size_bytes");
+
+                    b.Property<Guid>("SourceDocumentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("source_document_id");
+
+                    b.Property<string>("SourceLocation")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("source_location");
+
+                    b.Property<int>("SourceType")
+                        .HasColumnType("integer")
+                        .HasColumnName("source_type");
+
+                    b.Property<DateTimeOffset>("UploadedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("uploaded_at");
+
+                    b.Property<Guid>("UploadedDocumentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("uploaded_document_id");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ContentMd5");
+
+                    b.HasIndex("UploadedDocumentId", "Revision")
+                        .IsUnique();
+
+                    b.HasIndex("ArtifactId", "Name", "UploadedAt");
+
+                    b.ToTable("document_versions", "dochub");
                 });
 
             modelBuilder.Entity("Dochub.Api.Domain.Group", b =>
@@ -182,6 +407,27 @@ namespace Dochub.Api.Data.Migrations
                     b.HasIndex("OrganizationId", "UserId", "CreatedAt");
 
                     b.ToTable("notifications", "dochub");
+                });
+
+            modelBuilder.Entity("Dochub.Api.Domain.NotificationDismissal", b =>
+                {
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.Property<Guid>("NotificationId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("notification_id");
+
+                    b.Property<DateTimeOffset>("DismissedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("dismissed_at");
+
+                    b.HasKey("UserId", "NotificationId");
+
+                    b.HasIndex("NotificationId");
+
+                    b.ToTable("notification_dismissals", "dochub");
                 });
 
             modelBuilder.Entity("Dochub.Api.Domain.Organization", b =>
@@ -421,7 +667,7 @@ namespace Dochub.Api.Data.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("run_started_at");
 
-                    b.Property<Guid>("SourceConnectionId")
+                    b.Property<Guid?>("SourceConnectionId")
                         .HasColumnType("uuid")
                         .HasColumnName("source_connection_id");
 
@@ -600,6 +846,10 @@ namespace Dochub.Api.Data.Migrations
                         .HasColumnType("character varying(50)")
                         .HasColumnName("reference");
 
+                    b.Property<int>("RemovedDocumentCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("removed_document_count");
+
                     b.Property<DateTimeOffset>("RequestedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("requested_at");
@@ -772,6 +1022,11 @@ namespace Dochub.Api.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("attempt_count");
 
+                    b.Property<string>("BlobETag")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("blob_etag");
+
                     b.Property<string>("BlobPath")
                         .HasMaxLength(1200)
                         .HasColumnType("character varying(1200)")
@@ -791,6 +1046,15 @@ namespace Dochub.Api.Data.Migrations
                         .HasColumnType("character varying(64)")
                         .HasColumnName("checksum_sha256");
 
+                    b.Property<int?>("ChunkCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("chunk_count");
+
+                    b.Property<string>("ContentMd5")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("content_md5");
+
                     b.Property<string>("ContentType")
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)")
@@ -799,6 +1063,10 @@ namespace Dochub.Api.Data.Migrations
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at");
+
+                    b.Property<Guid?>("CurrentVersionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("current_version_id");
 
                     b.Property<string>("Error")
                         .HasColumnType("text")
@@ -818,6 +1086,10 @@ namespace Dochub.Api.Data.Migrations
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)")
                         .HasColumnName("name");
+
+                    b.Property<DateTimeOffset?>("ProcessedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("processed_at");
 
                     b.Property<string>("RelativePath")
                         .IsRequired()
@@ -913,6 +1185,10 @@ namespace Dochub.Api.Data.Migrations
                         .HasColumnType("character varying(32)")
                         .HasColumnName("identity_provider");
 
+                    b.Property<bool>("IsCreator")
+                        .HasColumnType("boolean")
+                        .HasColumnName("is_creator");
+
                     b.Property<DateTimeOffset?>("LastLoginAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("last_login_at");
@@ -939,6 +1215,28 @@ namespace Dochub.Api.Data.Migrations
                     b.Navigation("Group");
                 });
 
+            modelBuilder.Entity("Dochub.Api.Domain.ChatMessage", b =>
+                {
+                    b.HasOne("Dochub.Api.Domain.ChatConversation", "Conversation")
+                        .WithMany("Messages")
+                        .HasForeignKey("ConversationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Conversation");
+                });
+
+            modelBuilder.Entity("Dochub.Api.Domain.DocumentVersion", b =>
+                {
+                    b.HasOne("Dochub.Api.Domain.UploadedDocument", "UploadedDocument")
+                        .WithMany()
+                        .HasForeignKey("UploadedDocumentId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("UploadedDocument");
+                });
+
             modelBuilder.Entity("Dochub.Api.Domain.Group", b =>
                 {
                     b.HasOne("Dochub.Api.Domain.Team", "Team")
@@ -948,6 +1246,21 @@ namespace Dochub.Api.Data.Migrations
                         .IsRequired();
 
                     b.Navigation("Team");
+                });
+
+            modelBuilder.Entity("Dochub.Api.Domain.NotificationDismissal", b =>
+                {
+                    b.HasOne("Dochub.Api.Domain.Notification", null)
+                        .WithMany()
+                        .HasForeignKey("NotificationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Dochub.Api.Domain.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("Dochub.Api.Domain.OrganizationMember", b =>
@@ -1072,6 +1385,11 @@ namespace Dochub.Api.Data.Migrations
                     b.Navigation("Documents");
 
                     b.Navigation("SourceDocuments");
+                });
+
+            modelBuilder.Entity("Dochub.Api.Domain.ChatConversation", b =>
+                {
+                    b.Navigation("Messages");
                 });
 
             modelBuilder.Entity("Dochub.Api.Domain.Group", b =>

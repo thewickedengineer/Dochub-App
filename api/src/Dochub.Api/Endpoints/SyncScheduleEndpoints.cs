@@ -16,7 +16,10 @@ public static class SyncScheduleEndpoints
     /// that can be re-listed on a cadence; a GitHub push or a local drag-and-drop
     /// has no such location to go back to.
     /// </summary>
-    public static readonly SourceType[] Syncable = [SourceType.SharePoint, SourceType.GoogleDrive];
+    public static readonly SourceType[] Syncable = [SourceType.SharePoint, SourceType.GoogleDrive, SourceType.GitHub];
+
+    /// <summary>Syncable sources that cannot be read at all without a connected account.</summary>
+    public static bool NeedsConnection(SourceType type) => type is SourceType.SharePoint or SourceType.GoogleDrive;
 
     public static void MapSyncScheduleEndpoints(this IEndpointRouteBuilder app)
     {

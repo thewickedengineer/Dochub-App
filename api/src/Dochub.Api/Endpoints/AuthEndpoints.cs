@@ -130,7 +130,7 @@ public static class AuthEndpoints
             || memberships.Any(m => m.CanCreateOrganizations || m.Role is OrgRole.Owner or OrgRole.Admin);
 
         var userDto = new UserDto(user.Id, user.Email, user.DisplayName, user.AvatarUrl,
-            user.IdentityProvider, canCreateOrgs, active?.Role.ToString());
+            user.IdentityProvider, canCreateOrgs, active?.Role.ToString(), user.IsCreator);
 
         return Results.Ok(new AuthResponse(token, expiresAt, userDto, activeDto, organizations));
     }

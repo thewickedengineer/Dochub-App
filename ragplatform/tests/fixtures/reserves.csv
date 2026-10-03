@@ -1,0 +1,5 @@
+Claim,Line,Status,Reserve
+CLM-1001,Motor,Open,1200.00
+CLM-1002,Home,Closed,5400.50
+CLM-1003,Travel,Open,310.00
+CLM-1004,Motor,Referred,18250.00

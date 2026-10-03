@@ -3,6 +3,8 @@ export type OrgRole = 'Member' | 'Admin' | 'Owner';
 export interface UserDto {
   id: string; email: string; displayName: string; avatarUrl?: string;
   identityProvider: string; canCreateOrganizations: boolean; role?: OrgRole;
+  /** Platform Creator: creates organizations and assigns their owners. */
+  isCreator?: boolean;
 }
 export interface OrganizationDto {
   id: string; name: string; slug: string; initials: string;
@@ -17,6 +19,9 @@ export interface ArtifactSummaryDto {
   groupId: string; groupName: string; teamId: string; teamName: string;
   totalDocuments: number; indexedDocuments: number; pendingDocuments: number;
   processingDocuments: number; failedDocuments: number; status: string;
+  /** Stored by the API when the RAG platform reports the artifact done. */
+  processingStatus: 'Empty' | 'Pending' | 'Processing' | 'Processed' | 'PartiallyProcessed' | 'Failed';
+  lastProcessedAt?: string;
 }
 export interface GroupDto { id: string; name: string; slug: string; description?: string; artifacts: ArtifactSummaryDto[] }
 export interface TeamDto {
@@ -25,7 +30,7 @@ export interface TeamDto {
 }
 export type SourceDocumentStatus =
   | 'RequestUpload' | 'Uploading' | 'Uploaded'
-  | 'Processing' | 'Processed' | 'PartiallyFailed' | 'Failed' | 'Cancelled';
+  | 'Processing' | 'Processed' | 'PartiallyFailed' | 'Failed' | 'Cancelled' | 'Removing';
 
 export interface DocumentDto {
   id: string; sourceDocumentId: string; name: string; relativePath: string; sourceLocation: string;
@@ -33,6 +38,7 @@ export interface DocumentDto {
   blobPath?: string; blobUrl?: string; blobUploadedAt?: string;
   error?: string; revision: number; lastSyncedAt?: string;
   createdAt: string; updatedAt: string;
+  contentMd5?: string; chunkCount?: number; processedAt?: string;
 }
 
 export interface SourceDocumentDto {
@@ -153,3 +159,39 @@ export interface StagedFileDto {
   stagingId: string; name: string; relativePath?: string; sizeBytes: number; contentType?: string;
 }
 export interface ApiErrorBody { code: string; message: string; details?: unknown }
+
+// ── Chat ──────────────────────────────────────────────────────────────────────
+export type ChatScope = 'Organization' | 'Team' | 'Group' | 'Artifact';
+
+export interface ChatConversationDto {
+  id: string; title: string; scope: ChatScope; scopeId?: string; scopeLabel: string;
+  createdAt: string; updatedAt: string;
+}
+
+/** One numbered source an answer was written from, as the RAG platform returned it. */
+export interface ChatSource {
+  n: number; chunk_id: string; document_id: string; dochub_document_id?: string; artifact_id?: string;
+  title?: string; filename?: string; heading_path: string[]; location?: string;
+  chunk_type: string; snippet: string; score: number;
+}
+
+export interface ChatMessageDto {
+  id: string; role: 'User' | 'Assistant'; content: string;
+  sources?: ChatSource[]; cited?: number[]; model?: string; error?: string; createdAt: string;
+}
+
+export interface ChatConversationDetailDto { conversation: ChatConversationDto; messages: ChatMessageDto[] }
+
+export type ChatEvent =
+  | { type: 'started'; questionId: string; answerId: string; scope: string; title: string }
+  | { type: 'sources'; query: string; sources: ChatSource[] }
+  | { type: 'delta'; text: string }
+  | { type: 'done'; cited: number[]; model?: string; usage?: Record<string, number> }
+  | { type: 'error'; error: string; detail?: string };
+
+// ── Platform (Creator) ────────────────────────────────────────────────────────
+export interface OwnerDto { userId: string; loginId: string; displayName: string; identityProvider: string; hasSignedIn: boolean }
+export interface PlatformOrganizationDto {
+  id: string; name: string; slug: string; initials: string; plan: string; memberCount: number;
+  owners: OwnerDto[]; createdBy?: string; createdAt: string;
+}

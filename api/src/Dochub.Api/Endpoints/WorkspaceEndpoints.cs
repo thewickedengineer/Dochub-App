@@ -265,6 +265,7 @@ public static class WorkspaceEndpoints
         return new ArtifactSummaryDto(
             artifact.Id, artifact.Name, artifact.Slug, artifact.Category, artifact.PrimarySource.ToString(),
             group.Id, group.Name, team.Id, team.Name,
-            total, indexed, pending, processing, failed, status);
+            total, indexed, pending, processing, failed, status,
+            artifact.Status.ToString(), artifact.LastProcessedAt);
     }
 }

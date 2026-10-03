@@ -157,4 +157,26 @@ public class SyncReconciliationTests : PipelineTestBase
         Assert.Equal(0, second.UpdatedDocumentCount);
         Assert.Equal(2, await Db.UploadedDocuments.CountAsync(x => x.ArtifactId == Artifact.Id));
     }
+
+    [Fact]
+    public async Task Unchanged_bytes_are_processed_again_when_the_last_attempt_failed()
+    {
+        var scheduleId = await ScheduleAsync();
+        Extractor.Files = new() { ["tiny.txt"] = "Hello World!" };
+        var first = await SubmitAndExtractAsync(scheduleId);
+        // The vector service rejected it.
+        await Db.UploadedDocuments.ExecuteUpdateAsync(s => s
+            .SetProperty(x => x.Status, DocumentStatus.Failed).SetProperty(x => x.Error, "low_quality_extraction"));
+        await Db.SourceDocuments.Where(x => x.Id == first.Id)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, SourceDocumentStatus.Failed));
+        Db.ChangeTracker.Clear();
+
+        var second = await SubmitAndExtractAsync(scheduleId);
+
+        Assert.Equal(0, second.UnchangedDocumentCount);
+        Assert.Equal(1, second.UpdatedDocumentCount);
+        var document = await Db.UploadedDocuments.AsNoTracking().SingleAsync();
+        Assert.Equal(DocumentStatus.Uploaded, document.Status);           // sent for processing, not called indexed
+        Assert.Null(document.Error);
+    }
 }

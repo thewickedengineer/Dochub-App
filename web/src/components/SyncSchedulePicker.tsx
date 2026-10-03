@@ -40,7 +40,7 @@ export const describe = (draft: ScheduleDraft) => {
 
 /**
  * The two ways to bring a source in: once, or once and then on a cadence.
- * Recurring is only offered for SharePoint and Google Drive — the sources whose
+ * Recurring is only offered for SharePoint, Google Drive and GitHub — the sources whose
  * folders can be re-listed later. `disabledReason` explains when it can't be.
  */
 export default function SyncSchedulePicker({

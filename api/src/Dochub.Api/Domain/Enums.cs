@@ -40,7 +40,9 @@ public enum SourceDocumentStatus
     Processed = 4,
     PartiallyFailed = 5,
     Failed = 6,
-    Cancelled = 7
+    Cancelled = 7,
+    /// <summary>Being removed by the user: vectors, blobs and rows are going. Retrying is safe.</summary>
+    Removing = 8
 }
 
 /// <summary>
@@ -71,3 +73,8 @@ public enum SyncScheduleStatus { Active = 0, Paused = 1, Failed = 2 }
 
 /// <summary>What a sync did to one document, matched against the artifact by file name.</summary>
 public enum SyncAction { Unchanged = 0, Updated = 1, Added = 2, Failed = 3 }
+
+/// <summary>What a chat conversation searches: the whole organization, or one team, group or artifact.</summary>
+public enum ChatScope { Organization = 0, Team = 1, Group = 2, Artifact = 3 }
+
+public enum ChatRole { User = 0, Assistant = 1 }

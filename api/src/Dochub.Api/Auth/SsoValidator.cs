@@ -17,9 +17,14 @@ public interface ISsoValidator
     Task<ExternalIdentity> ValidateAsync(string provider, string idToken, CancellationToken ct);
 }
 
-public class SsoValidator(IOptions<SsoOptions> options, ILogger<SsoValidator> log) : ISsoValidator
+public class SsoValidator(
+    IOptions<SsoOptions> options,
+    IOptions<OAuthOptions> oauth,
+    ILogger<SsoValidator> log) : ISsoValidator
 {
-    private readonly SsoOptions _options = options.Value;
+    // One app registration is the common case, so an unset Sso value falls back
+    // to the OAuth one rather than making the same id be configured twice.
+    private readonly SsoOptions _options = options.Value.ResolvedAgainst(oauth.Value);
     private ConfigurationManager<OpenIdConnectConfiguration>? _microsoftConfig;
 
     public Task<ExternalIdentity> ValidateAsync(string provider, string idToken, CancellationToken ct) =>
@@ -34,7 +39,10 @@ public class SsoValidator(IOptions<SsoOptions> options, ILogger<SsoValidator> lo
     private async Task<ExternalIdentity> ValidateGoogleAsync(string idToken, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(_options.GoogleClientId))
-            throw new InvalidOperationException("Sso:GoogleClientId is not configured.");
+            throw new InvalidOperationException(
+                "No Google client id is configured. Set Sso:GoogleClientId, or OAuth:Google:ClientId " +
+                "if one registration serves both. It must be the same id the browser used, " +
+                "since it is what the token's audience is checked against.");
 
         var settings = new GoogleJsonWebSignature.ValidationSettings
         {
@@ -52,7 +60,10 @@ public class SsoValidator(IOptions<SsoOptions> options, ILogger<SsoValidator> lo
     private async Task<ExternalIdentity> ValidateMicrosoftAsync(string idToken, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(_options.MicrosoftClientId))
-            throw new InvalidOperationException("Sso:MicrosoftClientId is not configured.");
+            throw new InvalidOperationException(
+                "No Microsoft client id is configured. Set Sso:MicrosoftClientId, or OAuth:Microsoft:ClientId " +
+                "if one registration serves both. It must be the same id VITE_MICROSOFT_CLIENT_ID uses, " +
+                "since it is what the token's audience is checked against.");
 
         _microsoftConfig ??= new ConfigurationManager<OpenIdConnectConfiguration>(
             $"https://login.microsoftonline.com/{_options.MicrosoftTenant}/v2.0/.well-known/openid-configuration",

@@ -99,8 +99,10 @@ public class LocalFileExtractor(IStagingStore staging, ILogger<LocalFileExtracto
 }
 
 /// <summary>
-/// Walks a repository tree through the GitHub REST API. Honours branch, path
-/// prefix and an extension allow-list, all supplied in the upload request.
+/// Downloads a repository branch as one archive and hands its files on from disk.
+/// One API request per import, whatever the size of the repository: anonymous
+/// access allows only 60 an hour, so fetching file by file could never finish a
+/// repository of any size. Honours path prefix and an extension allow-list.
 /// </summary>
 public class GitHubExtractor(IHttpClientFactory http, ILogger<GitHubExtractor> log) : ISourceExtractor
 {
@@ -117,43 +119,97 @@ public class GitHubExtractor(IHttpClientFactory http, ILogger<GitHubExtractor> l
         var extensions = context.Options.GetStringArray("fileTypes");
 
         var client = http.CreateClient("github");
-        if (!string.IsNullOrWhiteSpace(context.AccessToken))
+        var hasToken = !string.IsNullOrWhiteSpace(context.AccessToken);
+        if (hasToken)
             client.DefaultRequestHeaders.Authorization = new("Bearer", context.AccessToken);
 
-        var treeUrl = $"repos/{repo}/git/trees/{Uri.EscapeDataString(branch)}?recursive=1";
-        using var response = await client.GetAsync(treeUrl, ct);
-        response.EnsureSuccessStatusCode();
-        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
-
-        if (doc.RootElement.TryGetProperty("truncated", out var truncated) && truncated.GetBoolean())
-            log.LogWarning("GitHub tree for {Repo}@{Branch} was truncated; narrow the path filter", repo, branch);
-
-        foreach (var node in doc.RootElement.GetProperty("tree").EnumerateArray())
+        var workDir = Path.Combine(Path.GetTempPath(), "dochub-github", Guid.NewGuid().ToString("n"));
+        try
         {
-            if (node.GetProperty("type").GetString() != "blob") continue;
-            var path = node.GetProperty("path").GetString()!;
-            if (pathPrefix.Length > 0 && !path.StartsWith(pathPrefix + "/", StringComparison.OrdinalIgnoreCase)) continue;
-            if (extensions.Count > 0 && !extensions.Any(x => path.EndsWith("." + x.TrimStart('.'), StringComparison.OrdinalIgnoreCase))) continue;
+            // GitHub redirects to codeload.github.com, which serves the archive itself.
+            using (var response = await client.GetAsync($"repos/{repo}/tarball/{Uri.EscapeDataString(branch)}",
+                       HttpCompletionOption.ResponseHeadersRead, ct))
+            {
+                EnsureGitHubSuccess(response, repo, branch, hasToken);
+                await using var archive = await response.Content.ReadAsStreamAsync(ct);
+                await UnpackAsync(archive, workDir, ct);
+            }
 
-            var sha = node.GetProperty("sha").GetString()!;
-            var size = node.TryGetProperty("size", out var s) ? s.GetInt64() : 0;
-            var relative = pathPrefix.Length > 0 ? path[(pathPrefix.Length + 1)..] : path;
+            var files = ListFiles(workDir);
+            log.LogInformation("GitHub {Repo}@{Branch}: {Count} files in the archive", repo, branch, files.Count);
 
-            yield return new ExtractedDocument(
-                Name: Path.GetFileName(path),
-                RelativePath: relative,
-                SourceLocation: $"{repo}/{path}@{branch}",
-                ContentType: MimeTypes.For(path),
-                ExternalId: sha,
-                SizeHint: size,
-                OpenAsync: async token =>
-                {
-                    var raw = await client.GetAsync($"repos/{repo}/contents/{Uri.EscapeDataString(path)}?ref={Uri.EscapeDataString(branch)}",
-                        HttpCompletionOption.ResponseHeadersRead, token);
-                    raw.EnsureSuccessStatusCode();
-                    return await raw.Content.ReadAsStreamAsync(token);
-                });
+            foreach (var (path, fullPath, size) in files)
+            {
+                if (pathPrefix.Length > 0 && !path.StartsWith(pathPrefix + "/", StringComparison.OrdinalIgnoreCase)) continue;
+                if (extensions.Count > 0 && !extensions.Any(x => path.EndsWith("." + x.TrimStart('.'), StringComparison.OrdinalIgnoreCase))) continue;
+
+                var relative = pathPrefix.Length > 0 ? path[(pathPrefix.Length + 1)..] : path;
+                yield return new ExtractedDocument(
+                    Name: Path.GetFileName(path),
+                    RelativePath: relative,
+                    SourceLocation: $"{repo}/{path}@{branch}",
+                    ContentType: MimeTypes.For(path),
+                    // The path is the file's identity in the repository; two files
+                    // can share content (empty files, copies).
+                    ExternalId: $"{repo}@{branch}:{path}",
+                    SizeHint: size,
+                    OpenAsync: _ => Task.FromResult<Stream>(File.OpenRead(fullPath)));
+            }
         }
+        finally
+        {
+            try { if (Directory.Exists(workDir)) Directory.Delete(workDir, recursive: true); }
+            catch (IOException ex) { log.LogWarning(ex, "Could not remove {Dir}", workDir); }
+        }
+    }
+
+    /// <summary>Unpacks a gzipped tar archive into <paramref name="workDir"/>.</summary>
+    public static async Task UnpackAsync(Stream gzippedTar, string workDir, CancellationToken ct)
+    {
+        Directory.CreateDirectory(workDir);
+        await using var gzip = new System.IO.Compression.GZipStream(gzippedTar, System.IO.Compression.CompressionMode.Decompress);
+        // Rejects entries that would land outside workDir.
+        await System.Formats.Tar.TarFile.ExtractToDirectoryAsync(gzip, workDir, overwriteFiles: true, ct);
+    }
+
+    /// <summary>
+    /// The regular files of an unpacked archive, by their path in the repository.
+    /// GitHub wraps everything in one "owner-repo-sha" folder, which is not part of the path.
+    /// </summary>
+    public static List<(string Path, string FullPath, long Size)> ListFiles(string workDir)
+    {
+        var dirs = Directory.GetDirectories(workDir);
+        var root = dirs.Length == 1 && Directory.GetFiles(workDir).Length == 0 ? dirs[0] : workDir;
+        return new DirectoryInfo(root)
+            .EnumerateFiles("*", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint })
+            .Select(f => (Path.GetRelativePath(root, f.FullName).Replace('\\', '/'), f.FullName, f.Length))
+            .OrderBy(f => f.Item1, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    /// <summary>
+    /// GitHub answers 403 for a spent rate limit as well as for a refused token,
+    /// and 404 for a private repository read without access. Say which it was,
+    /// rather than telling someone with no token that their token was rejected.
+    /// </summary>
+    private static void EnsureGitHubSuccess(HttpResponseMessage response, string repo, string branch, bool hasToken)
+    {
+        if (response.IsSuccessStatusCode) return;
+        var status = (int)response.StatusCode;
+        var remaining = response.Headers.TryGetValues("x-ratelimit-remaining", out var r) ? r.FirstOrDefault() : null;
+        if (status == 429 || (status == 403 && remaining == "0"))
+        {
+            var reset = response.Headers.TryGetValues("x-ratelimit-reset", out var s) && long.TryParse(s.FirstOrDefault(), out var epoch)
+                ? DateTimeOffset.FromUnixTimeSeconds(epoch) : (DateTimeOffset?)null;
+            throw new GitHubRateLimitException(
+                $"GitHub's rate limit is used up{(reset is { } at ? $" until {at:HH:mm} UTC" : "")}. " +
+                (hasToken ? "Try again after that." : "Anonymous access allows 60 requests an hour; connect GitHub with a token for 5,000."));
+        }
+        if (status == 404)
+            throw new InvalidOperationException(hasToken
+                ? $"GitHub can't find {repo}@{branch}, or the connected token can't read it."
+                : $"GitHub can't find {repo}@{branch}. If it's private, connect GitHub with a token that can read it.");
+        response.EnsureSuccessStatusCode();
     }
 
     private static string NormalizeRepo(string value)
@@ -443,3 +499,6 @@ public static class JsonElementExtensions
         };
     }
 }
+
+/// <summary>A provider's rate limit is spent: transient, and not the token's fault.</summary>
+public sealed class GitHubRateLimitException(string message) : InvalidOperationException(message);

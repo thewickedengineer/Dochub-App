@@ -2,9 +2,11 @@
 #
 #   docker compose up -d
 #
-# Brings up the two backing services the API expects on localhost. Azure Service
-# Bus has no local emulator, so the pipeline falls back to the in-process queue
-# unless ServiceBus:Enabled is turned on against a real namespace.
+# Brings up the backing services on localhost. With ServiceBus:Enabled=false both
+# queues live in Postgres (dochub.queue_messages) with broker-like semantics;
+# turn it on to use a real Azure Service Bus namespace instead.
+#
+#   docker compose --profile rag up -d     # also builds and runs the RAG platform
 services:
   postgres:
     image: postgres:16-alpine
@@ -30,7 +32,9 @@ services:
     image: mcr.microsoft.com/azure-storage/azurite:latest
     container_name: dochub-azurite
     restart: unless-stopped
-    command: azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0 --location /data
+    # --skipApiVersionCheck: SDKs (the Python one especially) move to new storage
+    # API versions before the emulator image catches up. Emulator-only flag.
+    command: azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0 --location /data --skipApiVersionCheck
     ports:
       - "10000:10000"  # blob
       - "10001:10001"  # queue
@@ -38,6 +42,67 @@ services:
     volumes:
       - dochub-azurite:/data
 
+  # The RAG platform's own database. Separate from Dochub's on purpose: it needs
+  # pgvector, and moving the existing alpine (musl) Postgres onto a glibc
+  # pgvector image would change collation underneath existing text indexes.
+  rag-postgres:
+    image: pgvector/pgvector:pg16
+    container_name: dochub-rag-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: rag
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: rag
+    ports:
+      - "5433:5432"
+    volumes:
+      - dochub-rag-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag -d rag"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # The vector service: consumes the process queue, writes chunks and vectors,
+  # and reports each document and each batch back to the Dochub API.
+  rag-worker:
+    build: ./ragplatform
+    container_name: dochub-rag-worker
+    profiles: ["rag"]
+    command: ["rag-ingest", "worker"]
+    env_file: ./ragplatform/.env
+    environment:
+      RAG_DATABASE_DSN: postgresql://rag:rag@rag-postgres:5432/${RAG_DATABASE_NAME:-rag}
+      DOCHUB_QUEUE_DSN: postgresql://dochub:dochub@postgres:5432/dochub
+      BLOB_CONNECTION_STRING: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;"
+      DOCHUB_API_URL: http://host.docker.internal:5080
+    volumes:
+      - dochub-rag-models:/models     # embedding + Docling layout/OCR models, downloaded once
+    ports:
+      - "9464:9464"                   # the worker's Prometheus metrics
+    depends_on:
+      rag-postgres: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+
+  rag-api:
+    build: ./ragplatform
+    container_name: dochub-rag-api
+    profiles: ["rag"]
+    command: ["rag-ingest", "api"]
+    env_file: ./ragplatform/.env
+    environment:
+      RAG_DATABASE_DSN: postgresql://rag:rag@rag-postgres:5432/${RAG_DATABASE_NAME:-rag}
+      DOCHUB_QUEUE_DSN: postgresql://dochub:dochub@postgres:5432/dochub
+      BLOB_CONNECTION_STRING: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://azurite:10000/devstoreaccount1;"
+    volumes:
+      - dochub-rag-models:/models
+    ports:
+      - "8090:8090"
+    depends_on:
+      rag-postgres: { condition: service_healthy }
+
 volumes:
   dochub-pgdata:
   dochub-azurite:
+  dochub-rag-pgdata:
+  dochub-rag-models:

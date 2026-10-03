@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Dochub.Api.Endpoints;
 
 namespace Dochub.Api.Domain;
 
@@ -14,6 +15,12 @@ public class User
     public string ExternalSubject { get; set; } = default!;
     /// <summary>Platform-level flag gating "Create organization". Org Owners/Admins get it implicitly.</summary>
     public bool CanCreateOrganizations { get; set; }
+    /// <summary>
+    /// Platform-level Creator: creates organizations and assigns or replaces their
+    /// owners, without having to be a member of them. Granted only from
+    /// configuration (Platform:Creators), never through the API.
+    /// </summary>
+    public bool IsCreator { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? LastLoginAt { get; set; }
 
@@ -100,6 +107,9 @@ public class Artifact
     public string Category { get; set; } = default!;
     public SourceType PrimarySource { get; set; }
     public string? Description { get; set; }
+    /// <summary>Set by the vector service's completion call, not inferred.</summary>
+    public ArtifactStatus Status { get; set; } = ArtifactStatus.Empty;
+    public DateTimeOffset? LastProcessedAt { get; set; }
     public Guid CreatedByUserId { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 
@@ -167,6 +177,8 @@ public class SourceDocument
     public int AddedDocumentCount { get; set; }
     public int UpdatedDocumentCount { get; set; }
     public int UnchangedDocumentCount { get; set; }
+    /// <summary>Documents a sync found gone from the source, and removed from Dochub and the index.</summary>
+    public int RemovedDocumentCount { get; set; }
 
     public string? BlobContainer { get; set; }
     /// <summary>teams/{team}/groups/{group}/artifacts/{artifact}/{yyyyMMddTHHmmssfffZ}</summary>
@@ -203,6 +215,14 @@ public class UploadedDocument
     public string? ContentType { get; set; }
     public long SizeBytes { get; set; }
     public string? ChecksumSha256 { get; set; }
+    /// <summary>Content-MD5 as returned by blob storage for the current blob. Drives change detection.</summary>
+    public string? ContentMd5 { get; set; }
+    public string? BlobETag { get; set; }
+    /// <summary>The version row describing the blob this document currently points at.</summary>
+    public Guid? CurrentVersionId { get; set; }
+    /// <summary>When the vector service finished with the current version.</summary>
+    public DateTimeOffset? ProcessedAt { get; set; }
+    public int? ChunkCount { get; set; }
     public DocumentStatus Status { get; set; } = DocumentStatus.Pending;
     public string? BlobPath { get; set; }
     public string? BlobUrl { get; set; }
@@ -214,6 +234,57 @@ public class UploadedDocument
     public DateTimeOffset? LastSyncedAt { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+/// <summary>
+/// One row per blob actually written for a document: its name, where it came
+/// from, where it landed, and the hash storage returned for it.
+///
+/// Kept apart from <see cref="UploadedDocument"/> (which is the document's
+/// current state) so there is a history to compare against — a recurring update
+/// asks "is this the same bytes as the latest version?" and the answer is here.
+/// </summary>
+public class DocumentVersion
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid UploadedDocumentId { get; set; }
+    public UploadedDocument UploadedDocument { get; set; } = default!;
+    public Guid SourceDocumentId { get; set; }
+    public Guid ArtifactId { get; set; }
+    public int Revision { get; set; }
+
+    public string Name { get; set; } = default!;
+    public string RelativePath { get; set; } = default!;
+    public string SourceLocation { get; set; } = default!;
+    public SourceType SourceType { get; set; }
+    public string? ExternalId { get; set; }
+    public string? ContentType { get; set; }
+    public long SizeBytes { get; set; }
+
+    public string BlobContainer { get; set; } = default!;
+    public string BlobPath { get; set; } = default!;
+    public string BlobUrl { get; set; } = default!;
+    public string? BlobETag { get; set; }
+    /// <summary>Content-MD5 returned by blob storage on upload, base64.</summary>
+    public string ContentMd5 { get; set; } = default!;
+    /// <summary>SHA-256 computed while streaming, hex. Independent of the store.</summary>
+    public string ContentSha256 { get; set; } = default!;
+    public DateTimeOffset BlobLastModified { get; set; }
+    public DateTimeOffset UploadedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
+/// <summary>Where an artifact stands, as reported by the vector service.</summary>
+public enum ArtifactStatus { Empty = 0, Pending = 1, Processing = 2, Processed = 3, PartiallyProcessed = 4, Failed = 5 }
+
+/// <summary>
+/// One person clearing a notification. Notifications are broadcast to the whole
+/// organization, so clearing hides it for that person only — never for anyone else.
+/// </summary>
+public class NotificationDismissal
+{
+    public Guid NotificationId { get; set; }
+    public Guid UserId { get; set; }
+    public DateTimeOffset DismissedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
 public class Notification
@@ -233,7 +304,7 @@ public class Notification
 }
 
 /// <summary>
-/// A standing instruction to re-import a SharePoint or Google Drive location on a
+/// A standing instruction to re-import a SharePoint, Google Drive or GitHub location on a
 /// cadence and refresh the vectors for documents that changed. Only those two
 /// sources qualify: both expose a stable, listable folder that can be re-read, so a
 /// later run can match what it finds against what the artifact already holds.
@@ -245,10 +316,13 @@ public class RecurringSyncSchedule
     public Guid ArtifactId { get; set; }
     public Artifact Artifact { get; set; } = default!;
 
-    /// <summary>Constrained to <see cref="SourceType.SharePoint"/> or <see cref="SourceType.GoogleDrive"/>.</summary>
+    /// <summary>One of <see cref="SyncScheduleEndpoints.Syncable"/>: SharePoint, Google Drive or GitHub.</summary>
     public SourceType SourceType { get; set; }
-    /// <summary>The grant the sync runs under. Without it the schedule cannot authenticate.</summary>
-    public Guid SourceConnectionId { get; set; }
+    /// <summary>
+    /// The grant the sync runs under. Required for SharePoint and Google Drive; empty
+    /// for a public GitHub repository, which needs no token.
+    /// </summary>
+    public Guid? SourceConnectionId { get; set; }
     public string SourceReference { get; set; } = default!;
     /// <summary>The same connector payload the original upload used (driveId/itemId, folderId).</summary>
     public JsonDocument? SourceOptions { get; set; }
@@ -304,4 +378,44 @@ public class QueueMessage
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? CompletedAt { get; set; }
     public string? Error { get; set; }
+}
+
+
+/// <summary>
+/// One person's conversation with the knowledge base, inside one organization.
+/// The scope is resolved to artifacts on every turn, so documents added to a team
+/// later are searched too.
+/// </summary>
+public class ChatConversation
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid OrganizationId { get; set; }
+    public Guid UserId { get; set; }
+    public string Title { get; set; } = "New conversation";
+    public ChatScope Scope { get; set; } = ChatScope.Organization;
+    public Guid? ScopeId { get; set; }
+    /// <summary>The scope's name when it was chosen, for the conversation list.</summary>
+    public string ScopeLabel { get; set; } = "";
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    public ICollection<ChatMessage> Messages { get; set; } = [];
+}
+
+public class ChatMessage
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid ConversationId { get; set; }
+    public ChatConversation Conversation { get; set; } = default!;
+    public ChatRole Role { get; set; }
+    public string Content { get; set; } = "";
+    /// <summary>The numbered sources the answer was written from (jsonb), as the RAG platform returned them.</summary>
+    public string? Sources { get; set; }
+    /// <summary>Source numbers the answer actually cites (jsonb array).</summary>
+    public string? Cited { get; set; }
+    public string? Model { get; set; }
+    /// <summary>Token and cost accounting for the turn (jsonb).</summary>
+    public string? Usage { get; set; }
+    public string? Error { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 }

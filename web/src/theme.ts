@@ -52,6 +52,7 @@ export const ST: Record<string, { bg: string; fg: string; dot: string }> = {
   Skipped: { bg: '#F1F1ED', fg: '#6B6F76', dot: '#B0B3BA' },
   Empty: { bg: '#F1F1ED', fg: '#6B6F76', dot: '#B0B3BA' },
   Cancelled: { bg: '#F1F1ED', fg: '#6B6F76', dot: '#B0B3BA' },
+  Removing: { bg: '#F1F1ED', fg: '#6B6F76', dot: '#B0B3BA' },
 };
 
 export const stOf = (key?: string) => ST[key ?? 'Pending'] ?? ST.Pending;

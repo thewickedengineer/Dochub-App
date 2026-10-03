@@ -12,6 +12,7 @@ const NAV = [
   { key: '/workspace', label: 'Workspace', icon: '▦' },
   { key: '/members', label: 'Members', icon: '◎' },
   { key: '/ask', label: 'Ask', icon: '✦' },
+  { key: '/chat', label: 'Chat', icon: '💬' },
 ];
 
 export default function Shell({ children }: { children: ReactNode }) {
@@ -141,7 +142,7 @@ export default function Shell({ children }: { children: ReactNode }) {
           </div>
 
           <nav style={{ padding: '6px 14px', display: 'flex', flexDirection: 'column', gap: 2 }}>
-            {NAV.map(n => {
+            {[...NAV, ...(user?.isCreator ? [{ key: '/platform', label: 'Organizations', icon: '⌂' }] : [])].map(n => {
               const on = location.pathname.startsWith(n.key);
               return (
                 <NavLink
@@ -234,7 +235,7 @@ export default function Shell({ children }: { children: ReactNode }) {
 }
 
 function NotificationDrawer({ onClose }: { onClose: () => void }) {
-  const { notifications, markNotificationsRead } = useApp();
+  const { notifications, markNotificationsRead, clearNotifications } = useApp();
 
   // Opening the drawer is the read signal, matching the design's badge behaviour.
   useState(() => { void markNotificationsRead(); return null; });
@@ -249,6 +250,12 @@ function NotificationDrawer({ onClose }: { onClose: () => void }) {
       }}>
         <div style={{ height: 60, display: 'flex', alignItems: 'center', padding: '0 20px', borderBottom: `1px solid ${c.rule}` }}>
           <span style={{ flex: 1, fontWeight: 600, fontSize: 15 }}>Notifications</span>
+          {notifications.length > 0 && (
+            <button
+              onClick={() => void clearNotifications()}
+              style={{ border: 0, background: 'transparent', color: c.accent, cursor: 'pointer', fontSize: 13, fontFamily: 'inherit', marginRight: 10 }}
+            >Clear all</button>
+          )}
           <button onClick={onClose} style={{ border: 0, background: 'transparent', fontSize: 18, cursor: 'pointer', color: c.muted }}>×</button>
         </div>
         <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
@@ -267,11 +274,17 @@ function NotificationDrawer({ onClose }: { onClose: () => void }) {
                   width: 28, height: 28, borderRadius: '50%', display: 'grid', placeItems: 'center',
                   fontSize: 13, flex: 'none', background: tone.bg, color: tone.fg,
                 }}>{tone.icon}</span>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0 }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0, flex: 1 }}>
                   <div style={{ fontSize: 14, fontWeight: 500 }}>{n.title}</div>
                   <div style={{ fontSize: 13, color: c.muted, lineHeight: 1.45 }}>{n.body}</div>
                   <div style={{ fontSize: 12, color: c.faint }}>{formatTime(n.createdAt)}</div>
                 </div>
+                <button
+                  title="Clear this notification"
+                  aria-label="Clear this notification"
+                  onClick={() => void clearNotifications(n.id)}
+                  style={{ border: 0, background: 'transparent', color: c.faint, cursor: 'pointer', fontSize: 16, alignSelf: 'flex-start', padding: 2 }}
+                >×</button>
               </div>
             );
           })}
@@ -283,6 +296,7 @@ function NotificationDrawer({ onClose }: { onClose: () => void }) {
 
 function CreateOrganizationModal({ onClose, onCreated }: { onClose: () => void; onCreated: (name: string) => void }) {
   const [name, setName] = useState('');
+  const [owner, setOwner] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -291,7 +305,7 @@ function CreateOrganizationModal({ onClose, onCreated }: { onClose: () => void; 
     setBusy(true);
     setError(null);
     try {
-      const created = await api.createOrganization(name.trim());
+      const created = await api.createOrganization(name.trim(), owner.trim() || undefined);
       onCreated(created.name);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not create the organization.');
@@ -302,7 +316,7 @@ function CreateOrganizationModal({ onClose, onCreated }: { onClose: () => void; 
   return (
     <Modal
       title="Create organization"
-      subtitle="You'll be the owner and can add members."
+      subtitle="Name its owner, or leave the owner empty to own it yourself."
       onClose={onClose}
       footer={<>
         <span style={{ flex: 1, fontSize: 13, color: '#B13A26' }}>{error}</span>
@@ -319,6 +333,19 @@ function CreateOrganizationModal({ onClose, onCreated }: { onClose: () => void; 
           onKeyDown={e => { if (e.key === 'Enter') void submit(); }}
         />
       </Field>
+      <Field label="Owner login id (optional)">
+        <Input
+          value={owner}
+          type="email"
+          placeholder="name@company.com — the address they sign in with"
+          onChange={e => setOwner(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') void submit(); }}
+        />
+      </Field>
+      <div style={{ fontSize: 12, color: c.dim, marginTop: -4 }}>
+        A Microsoft work, school or personal account, or a Google account. If you name someone else,
+        you won't be added to the organization.
+      </div>
     </Modal>
   );
 }

@@ -44,6 +44,12 @@ public static class ProcessEndpoints
         group.MapGet("/source-documents/{sourceDocumentId:guid}", GetAsync)
             .WithSummary("One submitted source with its per-document detail");
 
+        group.MapDelete("/source-documents/{sourceDocumentId:guid}", RemoveAsync)
+            .WithSummary("Remove a failed or partly failed upload")
+            .WithDescription("Withdraws its queued work, removes its documents from the search index, deletes its files " +
+                             "from Blob storage and every row it wrote. Documents it only updated go back to their previous " +
+                             "version. If a step fails the upload stays 'Removing'; calling this again carries on.");
+
         group.MapPost("/source-documents/{sourceDocumentId:guid}/retry", RetryAsync)
             .WithSummary("Put a failed source back on the extract queue");
     }
@@ -129,7 +135,7 @@ public static class ProcessEndpoints
             {
                 if (!SyncScheduleEndpoints.Syncable.Contains(sourceType))
                     return Results.Json(new ApiError("not_syncable",
-                        $"Recurring updates need a SharePoint or Google Drive location. {sourceType.Label()} cannot be re-listed on a schedule."),
+                        $"Recurring updates need a SharePoint, Google Drive or GitHub location. {sourceType.Label()} cannot be re-listed on a schedule."),
                         statusCode: 400);
 
                 var check = SyncScheduleEndpoints.ParseCadence(
@@ -213,7 +219,8 @@ public static class ProcessEndpoints
             db.RecurringSyncSchedules.Add(schedule);
         }
 
-        schedule.SourceConnectionId = submission.SourceConnectionId!.Value;
+        // A public GitHub repository has none; SharePoint and Drive were checked to have one.
+        schedule.SourceConnectionId = submission.SourceConnectionId;
         schedule.SourceReference = submission.SourceReference;
         schedule.SourceOptions = submission.Options is { } options
             ? JsonDocument.Parse(options.GetRawText())
@@ -325,5 +332,34 @@ public static class ProcessEndpoints
 
         return Results.Accepted($"/api/source-documents/{source.Id}",
             new { source.Reference, Message = $"{source.Reference} is back on the extract queue." });
+    }
+
+    private static async Task<IResult> RemoveAsync(
+        Guid sourceDocumentId, HttpContext http, DochubDbContext db, UploadRemovalService removal, CancellationToken ct)
+    {
+        var orgId = http.User.RequireOrganizationId();
+        var userId = http.User.UserId();
+        var requester = await db.SourceDocuments.Where(s => s.Id == sourceDocumentId && s.OrganizationId == orgId)
+            .Select(s => (Guid?)s.RequestedByUserId).FirstOrDefaultAsync(ct);
+        if (requester is null) return Results.NotFound(new ApiError("not_found", "No such upload."));
+        // Whoever started it, or an owner or admin, may remove it.
+        if (requester != userId && http.User.Role() is not (OrgRole.Owner or OrgRole.Admin))
+            return Results.Json(new ApiError("forbidden", "Only the person who started this upload, or an owner or admin, can remove it."),
+                statusCode: StatusCodes.Status403Forbidden);
+        try
+        {
+            var result = await removal.RemoveAsync(sourceDocumentId, orgId, ct);
+            return Results.Ok(result);
+        }
+        catch (RemovalBlockedException e)
+        {
+            var status = e.Code switch
+            {
+                "not_found" => StatusCodes.Status404NotFound,
+                "rag_unavailable" => StatusCodes.Status503ServiceUnavailable,
+                _ => StatusCodes.Status409Conflict
+            };
+            return Results.Json(new ApiError(e.Code, e.Message), statusCode: status);
+        }
     }
 }

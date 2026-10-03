@@ -75,13 +75,15 @@ public static partial class Mapping
         return new ArtifactSummaryDto(
             artifact.Id, artifact.Name, artifact.Slug, artifact.Category, artifact.PrimarySource.ToString(),
             group.Id, group.Name, team.Id, team.Name,
-            documents.Count, indexed, pending, processing, failed, status);
+            documents.Count, indexed, pending, processing, failed, status,
+            artifact.Status.ToString(), artifact.LastProcessedAt);
     }
 
     public static DocumentDto ToDto(this UploadedDocument d) => new(
         d.Id, d.SourceDocumentId, d.Name, d.RelativePath, d.SourceLocation, d.SourceType.ToString(),
         d.Status.ToUiStatus(), d.SizeBytes, d.ContentType, d.BlobPath, d.BlobUrl,
-        d.BlobUploadedAt, d.Error, d.Revision, d.LastSyncedAt, d.CreatedAt, d.UpdatedAt);
+        d.BlobUploadedAt, d.Error, d.Revision, d.LastSyncedAt, d.CreatedAt, d.UpdatedAt,
+        d.ContentMd5, d.ChunkCount, d.ProcessedAt);
 
     public static SourceDocumentDto ToDto(this SourceDocument s, string artifactName, string path, string requestedBy) => new(
         s.Id, s.Reference, s.ArtifactId, artifactName, path,
@@ -116,6 +118,7 @@ public static partial class Mapping
         SourceDocumentStatus.Processed => "Processed",
         SourceDocumentStatus.PartiallyFailed => "Completed with errors",
         SourceDocumentStatus.Failed => "Failed",
+        SourceDocumentStatus.Removing => "Removing",
         _ => "Cancelled"
     };
 

@@ -30,6 +30,8 @@ public abstract class PipelineTestBase : IAsyncLifetime
     protected RecordingNotificationService Notifications = default!;
     protected SourceSubmissionService Submissions = default!;
     protected ExtractorService Extraction = default!;
+    protected FakeRagPurge Rag = default!;
+    protected UploadRemovalService Removal = default!;
 
     protected Artifact Artifact = default!;
     protected Guid OrganizationId;
@@ -54,7 +56,8 @@ public abstract class PipelineTestBase : IAsyncLifetime
 
         var options = new DbContextOptionsBuilder<DochubDbContext>()
             .UseNpgsql($"Host=localhost;Port=5432;Database={_database};Username=dochub;Password=dochub",
-                npgsql => npgsql.MigrationsHistoryTable("__EFMigrationsHistory", "dochub"))
+                // Same as Program.cs: user-initiated transactions must cope with the retry strategy.
+                npgsql => npgsql.EnableRetryOnFailure(3).MigrationsHistoryTable("__EFMigrationsHistory", "dochub"))
             .Options;
 
         Db = new DochubDbContext(options);
@@ -68,10 +71,14 @@ public abstract class PipelineTestBase : IAsyncLifetime
         Submissions = new SourceSubmissionService(
             Db, Blobs, Queues, QueueOptions, NullLogger<SourceSubmissionService>.Instance);
 
+        Rag = new FakeRagPurge();
+        Removal = new UploadRemovalService(Db, Blobs, Rag, Queues, QueueOptions, Notifications,
+            NullLogger<UploadRemovalService>.Instance);
+
         Extraction = new ExtractorService(
             Db, Blobs, new StubExtractorFactory(Extractor), new NoopStagingStore(),
             new StubTokenProvider(), Notifications, Queues, QueueOptions,
-            NullLogger<ExtractorService>.Instance);
+            NullLogger<ExtractorService>.Instance, Removal);
 
         await SeedAsync();
     }

@@ -21,7 +21,10 @@ public class FakeBlobStorage : IBlobStorageService
         var bytes = buffer.ToArray();
         Blobs[blobPath] = bytes;
         var checksum = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
-        return new BlobUploadResult(blobPath, $"https://test/{blobPath}", bytes.Length, checksum);
+        // Mirrors Azure: the store reports Content-MD5 of what it holds, base64.
+        var md5 = Convert.ToBase64String(System.Security.Cryptography.MD5.HashData(bytes));
+        return new BlobUploadResult(blobPath, $"https://test/{blobPath}", bytes.Length, checksum,
+            md5, $"\"0x{Guid.NewGuid():N}\"", DateTimeOffset.UtcNow);
     }
 
     public Task<Stream> OpenReadAsync(string blobPath, CancellationToken ct) =>
@@ -33,6 +36,32 @@ public class FakeBlobStorage : IBlobStorageService
         Blobs.Remove(blobPath);
         return Task.CompletedTask;
     }
+
+    public Task<int> DeletePrefixAsync(string prefix, CancellationToken ct)
+    {
+        var folder = prefix.TrimEnd('/') + "/";
+        var doomed = Blobs.Keys.Where(k => k.StartsWith(folder, StringComparison.Ordinal)).ToList();
+        foreach (var key in doomed) { Blobs.Remove(key); Deleted.Add(key); }
+        return Task.FromResult(doomed.Count);
+    }
+}
+
+/// <summary>The RAG platform's purge, answering what the test says.</summary>
+public class FakeRagPurge : IRagPurgeClient
+{
+    public List<IReadOnlyList<(Guid DocumentId, Guid? KeepVersionId)>> Calls { get; } = [];
+    public bool Unavailable { get; set; }
+    /// <summary>Outcome for a document asked to be kept; default "kept".</summary>
+    public string WhenKeepRequested { get; set; } = "kept";
+
+    public Task<IReadOnlyDictionary<Guid, string>> PurgeAsync(
+        Guid organizationId, IReadOnlyList<(Guid DocumentId, Guid? KeepVersionId)> documents, CancellationToken ct)
+    {
+        Calls.Add(documents);
+        if (Unavailable) throw new HttpRequestException("connection refused");
+        return Task.FromResult<IReadOnlyDictionary<Guid, string>>(documents.ToDictionary(
+            d => d.DocumentId, d => d.KeepVersionId is null ? "removed" : WhenKeepRequested));
+    }
 }
 
 /// <summary>Returns whatever the test says the remote folder currently holds.</summary>
@@ -40,16 +69,24 @@ public class StubExtractor(SourceType sourceType) : ISourceExtractor
 {
     public SourceType SourceType { get; } = sourceType;
     public Dictionary<string, string> Files { get; set; } = [];
+    /// <summary>When set, the listing breaks after this many files — a source failing mid-import.</summary>
+    public int? ThrowAfter { get; set; }
+    /// <summary>Give each file a stable source id, as GitHub, Drive and SharePoint do.</summary>
+    public bool WithExternalIds { get; set; }
 
     public async IAsyncEnumerable<ExtractedDocument> ExtractAsync(
         ExtractionContext context,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
+        var yielded = 0;
         foreach (var (name, content) in Files)
         {
+            if (ThrowAfter is { } limit && yielded++ >= limit)
+                throw new HttpRequestException("connection reset by the source");
             yield return new ExtractedDocument(
-                Name: name, RelativePath: name, SourceLocation: $"stub:/{name}",
-                ContentType: "text/plain", ExternalId: null, SizeHint: content.Length,
+                // A key may be a path ("docs/README.md"); the name is its last segment.
+                Name: Path.GetFileName(name), RelativePath: name, SourceLocation: $"stub:/{name}",
+                ContentType: "text/plain", ExternalId: WithExternalIds ? $"stub:{name}" : null, SizeHint: content.Length,
                 OpenAsync: _ => Task.FromResult<Stream>(new MemoryStream(Encoding.UTF8.GetBytes(content))));
             await Task.CompletedTask;
         }

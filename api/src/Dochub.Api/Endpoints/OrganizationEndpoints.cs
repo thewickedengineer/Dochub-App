@@ -55,6 +55,17 @@ public static class OrganizationEndpoints
             return Results.Json(new ApiError("insufficient_level",
                 "Creating organizations requires Owner or Admin level in an existing organization."), statusCode: 403);
 
+        // The owner is whoever the request names by their sign-in id; else the caller.
+        var owner = user;
+        if (!string.IsNullOrWhiteSpace(request.OwnerLoginId))
+        {
+            var loginId = request.OwnerLoginId.Trim().ToLowerInvariant();
+            if (!PlatformEndpoints.IsLoginId(loginId))
+                return Results.Json(new ApiError("invalid_owner",
+                    "The owner must be given by the address they sign in with, e.g. name@company.com."), statusCode: 400);
+            owner = await PlatformEndpoints.FindOrInviteAsync(db, loginId, request.OwnerDisplayName, ct);
+        }
+
         var slug = await UniqueSlugAsync(db, Mapping.Slugify(request.Name), ct);
         var organization = new Organization
         {
@@ -66,20 +77,22 @@ public static class OrganizationEndpoints
         };
         db.Organizations.Add(organization);
 
-        // The creator becomes Owner, which is the only level that can add members.
+        // The owner is the only level that can add members. When someone else is
+        // named, the caller is not added: a Creator sets organizations up for others.
         db.OrganizationMembers.Add(new OrganizationMember
         {
             Organization = organization,
-            UserId = userId,
+            UserId = owner.Id,
             Role = OrgRole.Owner,
-            CanCreateOrganizations = true
+            CanCreateOrganizations = true,
+            InvitedByUserId = owner.Id == userId ? null : userId
         });
 
         await db.SaveChangesAsync(ct);
 
         return Results.Created($"/api/organizations/{organization.Id}",
             new OrganizationDto(organization.Id, organization.Name, organization.Slug,
-                organization.Initials, organization.Plan, nameof(OrgRole.Owner), 1));
+                organization.Initials, organization.Plan, owner.Id == userId ? nameof(OrgRole.Owner) : "", 1));
     }
 
     private static async Task<IResult> ListMembersAsync(HttpContext http, DochubDbContext db, CancellationToken ct)

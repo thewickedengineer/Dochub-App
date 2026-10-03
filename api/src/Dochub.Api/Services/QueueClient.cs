@@ -71,13 +71,21 @@ public class ServiceBusQueueClient : IQueueClient, IAsyncDisposable
         var message = await receiver.ReceiveMessageAsync(TimeSpan.FromSeconds(5), ct);
         if (message is null) return null;
 
+        // A scheduled retry is a new message whose delivery count restarts at 1,
+        // so the attempt number travels in a property — otherwise retries never
+        // reach the dead-letter limit.
+        var carried = message.ApplicationProperties.TryGetValue("attempt", out var value)
+            ? Convert.ToInt32(value)
+            : 0;
+        var attempts = Math.Max(message.DeliveryCount, carried + 1);
+
         return new QueueLease(
-            message.MessageId, message.Subject ?? "", message.Body.ToString(), message.DeliveryCount,
+            message.MessageId, message.Subject ?? "", message.Body.ToString(), attempts,
             token => receiver.CompleteMessageAsync(message, token),
             async (reason, token) =>
             {
                 // Past the attempt ceiling the broker would loop forever, so park it.
-                if (message.DeliveryCount >= MaxDeliveryAttempts)
+                if (attempts >= MaxDeliveryAttempts)
                 {
                     await receiver.DeadLetterMessageAsync(message, "MaxAttempts", reason, token);
                     return;
@@ -86,20 +94,21 @@ public class ServiceBusQueueClient : IQueueClient, IAsyncDisposable
                 // Abandon alone redelivers immediately, which burns the attempt
                 // budget in seconds. Re-send the body for later instead, then drop
                 // the original so only the scheduled copy survives.
-                var retryAt = DateTimeOffset.UtcNow.Add(DatabaseQueueClient.BackoffFor(message.DeliveryCount));
+                var retryAt = DateTimeOffset.UtcNow.Add(DatabaseQueueClient.BackoffFor(attempts));
                 var retry = new ServiceBusMessage(message.Body)
                 {
-                    MessageId = $"{message.MessageId}-retry-{message.DeliveryCount}",
+                    MessageId = $"{message.MessageId}-retry-{attempts}",
                     Subject = message.Subject,
                     ContentType = message.ContentType,
                     SessionId = message.SessionId,
                     ScheduledEnqueueTime = retryAt
                 };
+                retry.ApplicationProperties["attempt"] = attempts;
                 var sender = await GetAsync(_senders, queue, q => _client.CreateSender(q));
                 await sender.SendMessageAsync(retry, token);
                 await receiver.CompleteMessageAsync(message, token);
                 _log.LogWarning("Message {MessageId} failed (attempt {Attempts}); re-queued for {RetryAt}: {Reason}",
-                    message.MessageId, message.DeliveryCount, retryAt, reason);
+                    message.MessageId, attempts, retryAt, reason);
             },
             (reason, token) => receiver.DeadLetterMessageAsync(message, "Rejected", reason, token));
     }

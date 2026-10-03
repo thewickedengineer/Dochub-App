@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
+import { useApp } from '../lib/AppContext';
 import { c } from '../theme';
 
 /**
@@ -8,9 +10,25 @@ import { c } from '../theme';
  * opened it, and closes.
  */
 export default function OAuthCallback() {
+  const { signIn } = useApp();
+  const navigate = useNavigate();
   const [message, setMessage] = useState('Finishing sign-in…');
 
   useEffect(() => {
+    // Signing in to Dochub returns an id_token in the fragment and lands in this
+    // tab; connecting a source returns a code in the query and lands in a popup.
+    // One path serves both so only one redirect URI has to be registered.
+    const fragment = new URLSearchParams(window.location.hash.slice(1));
+    const idToken = fragment.get('id_token');
+    if (idToken) {
+      signIn('microsoft', idToken)
+        .then(() => navigate('/upload', { replace: true }))
+        .catch((error: unknown) => {
+          setMessage(error instanceof Error ? error.message : 'Could not complete sign-in.');
+        });
+      return;
+    }
+
     const params = new URLSearchParams(window.location.search);
     const code = params.get('code');
     const state = params.get('state');
@@ -46,7 +64,7 @@ export default function OAuthCallback() {
         setMessage(text);
         report({ error: text });
       });
-  }, []);
+  }, [signIn, navigate]);
 
   return (
     <div style={{

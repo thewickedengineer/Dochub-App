@@ -14,9 +14,11 @@ info:
     (`dochub-source-upload-requested`). The extractor service claims one message at a
     time, flips the row to `Uploading`, moves the files to Azure Blob storage under
     `teams/{team}/groups/{group}/artifacts/{artifact}/{uploadedAt}`, sets `Uploaded`, and
-    hands the documents to the process queue (`dochub-document-process-requested`). A
-    separate Python vector service consumes that queue, stores the vectors, and moves the
-    source through `Processing` to `Processed`.
+    hands the documents to the process queue (`dochub-document-process-requested`). For
+    every blob it stores the content MD5 Azure returned in a `document_versions` row.
+    The RAG platform (`ragplatform/`) consumes the process queue, indexes each document
+    and reports back through the **Ingestion** endpoints: once per document, then once
+    for the artifact, which closes the source and sets the artifact's status.
 
     Local files are the one exception that needs a prior call: their bytes go to
     `POST /uploads/staging` immediately before Process, and the returned staging ids are
@@ -25,9 +27,9 @@ info:
     **Recurring updates.** A SharePoint or Google Drive source may carry a `schedule`,
     recorded in `recurring_sync_schedules` (frequency, time of day, time zone, next run).
     A scheduled run enters the same queues, but the extractor reconciles it against the
-    artifact **by file name**: changed content updates the document already held and is
-    re-queued so its vectors are replaced, new files are added, and unchanged files are
-    left alone.
+    artifact **by file name**, comparing the Azure content MD5: changed content gets a new
+    document version and is re-queued so its vectors are replaced, new files are added,
+    and unchanged files are left alone.
 
 servers:
   - url: http://localhost:5080
@@ -46,6 +48,13 @@ tags:
   - name: Notifications
   - name: Knowledge base
   - name: Scheduled updates
+  - name: Ingestion
+    description: Service-to-service callbacks from the RAG platform. Not for browsers.
+  - name: Chat
+    description: |
+      Questions answered from the indexed documents with numbered sources. Conversations
+      are per person and organization; the scope (organization, team, group or artifact)
+      is resolved server-side on every turn. Answers stream as server-sent events.
 
 paths:
   /api/auth/sso:
@@ -639,6 +648,187 @@ paths:
             application/json:
               schema: { type: object, properties: { markedRead: { type: integer } } }
 
+  /api/chat/conversations:
+    get:
+      tags: [Chat]
+      summary: The caller's conversations in the active organization, newest first
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/ChatConversation" } }
+    post:
+      tags: [Chat]
+      summary: Start a conversation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string, nullable: true }
+                scope: { $ref: "#/components/schemas/ChatScope" }
+                scopeId: { type: string, format: uuid, nullable: true, description: Required unless scope is Organization. }
+      responses:
+        "201":
+          description: Created
+          content: { application/json: { schema: { $ref: "#/components/schemas/ChatConversation" } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "404":
+          description: "`scope_not_found` — no such team, group or artifact in this organization."
+          content: { application/json: { schema: { $ref: "#/components/schemas/ApiError" } } }
+
+  /api/chat/conversations/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Chat]
+      summary: A conversation with its messages and their sources
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  conversation: { $ref: "#/components/schemas/ChatConversation" }
+                  messages: { type: array, items: { $ref: "#/components/schemas/ChatMessage" } }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      tags: [Chat]
+      summary: Rename a conversation or change what it searches
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string, nullable: true }
+                scope: { $ref: "#/components/schemas/ChatScope" }
+                scopeId: { type: string, format: uuid, nullable: true }
+      responses:
+        "200":
+          description: OK
+          content: { application/json: { schema: { $ref: "#/components/schemas/ChatConversation" } } }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [Chat]
+      summary: Delete a conversation and its messages
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/chat/conversations/{id}/messages:
+    post:
+      tags: [Chat]
+      summary: Ask a question
+      description: |
+        Saves the question, then streams `text/event-stream`. Each event is one
+        `data:` line holding a JSON object with a `type`:
+
+        - `started` — `{questionId, answerId, scope, title}`
+        - `sources` — `{query, sources: ChatSource[]}`, before any text
+        - `delta` — `{text}`, answer text as it is written
+        - `done` — `{cited: int[], model, usage}`
+        - `error` — `{error, answerId}` when the knowledge base fails mid-answer
+
+        The answer is saved with its sources even if the stream fails or the caller leaves.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string, minLength: 1, maxLength: 8000 }
+      responses:
+        "200":
+          description: The answer stream.
+          content:
+            text/event-stream:
+              schema: { type: string, example: "data: {\"type\":\"delta\",\"text\":\"Claims are acknowledged \"}\n\n" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/ingestion/documents/{documentId}/processed:
+    post:
+      tags: [Ingestion]
+      summary: Report one document indexed
+      security: [{ serviceKey: [] }]
+      parameters:
+        - { name: documentId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DocumentProcessedRequest" }
+      responses:
+        "200":
+          description: Document is now Indexed.
+          content: { application/json: { schema: { $ref: "#/components/schemas/IngestionAck" } } }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409":
+          description: |
+            `stale_version` — a newer upload of this file has replaced the version being
+            reported; the caller should treat it as done. `source_mismatch` — the document
+            is not part of that source.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ApiError" } } }
+        "503": { description: "`Ingestion:ServiceKey` is not configured." }
+
+  /api/ingestion/documents/{documentId}/failed:
+    post:
+      tags: [Ingestion]
+      summary: Report one document failed
+      security: [{ serviceKey: [] }]
+      parameters:
+        - { name: documentId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DocumentFailedRequest" }
+      responses:
+        "200":
+          description: Failure recorded; the error is shown on the document.
+          content: { application/json: { schema: { $ref: "#/components/schemas/IngestionAck" } } }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { description: "`Ingestion:ServiceKey` is not configured." }
+
+  /api/ingestion/artifacts/{artifactId}/processed:
+    post:
+      tags: [Ingestion]
+      summary: Report a source batch finished
+      description: |
+        Closes the source: documents never reported are marked Failed, the source becomes
+        `Processed`, `PartiallyFailed` or `Failed`, and the artifact status is computed from
+        **all** of the artifact's documents. Raises the completion notification.
+      security: [{ serviceKey: [] }]
+      parameters:
+        - { name: artifactId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ArtifactProcessedRequest" }
+      responses:
+        "200":
+          description: Batch closed.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ArtifactProcessedResponse" } } }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { description: "`Ingestion:ServiceKey` is not configured." }
+
   /health:
     get:
       summary: Liveness and database connectivity
@@ -654,6 +844,11 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: Token from `POST /api/auth/sso`. Carries the active `org_id`, so every request is tenant-scoped by the token.
+    serviceKey:
+      type: apiKey
+      in: header
+      name: X-Dochub-Service-Key
+      description: Equal to `Ingestion:ServiceKey` (≥32 chars). Used only by the RAG platform.
 
   responses:
     Error:
@@ -850,7 +1045,18 @@ components:
         pendingDocuments: { type: integer }
         processingDocuments: { type: integer }
         failedDocuments: { type: integer }
-        status: { type: string, enum: [Indexed, Pending, Processing, Failed] }
+        status:
+          type: string
+          description: Derived live from document counts.
+          enum: [Empty, Indexed, Pending, Processing, Failed]
+        processingStatus:
+          $ref: "#/components/schemas/ArtifactStatus"
+        lastProcessedAt: { type: string, format: date-time, nullable: true }
+
+    ArtifactStatus:
+      type: string
+      description: Stored on the artifact. Set to Pending on Process, Processing once files reach the process queue, and finally by the artifact callback.
+      enum: [Empty, Pending, Processing, Processed, PartiallyProcessed, Failed]
 
     Document:
       type: object
@@ -877,6 +1083,104 @@ components:
         lastSyncedAt: { type: string, format: date-time, nullable: true }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+        contentMd5:
+          type: string
+          nullable: true
+          description: Base64 MD5 that Azure Blob returned for the current version.
+          example: Cc1DVWbsE3AuUE4jDeOrGQ==
+        chunkCount: { type: integer, nullable: true }
+        processedAt: { type: string, format: date-time, nullable: true }
+
+    ChatScope:
+      type: string
+      enum: [Organization, Team, Group, Artifact]
+
+    ChatConversation:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        scope: { $ref: "#/components/schemas/ChatScope" }
+        scopeId: { type: string, format: uuid, nullable: true }
+        scopeLabel: { type: string, example: "Claims › Claims IT › Claims Core Repo" }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    ChatSource:
+      type: object
+      description: One numbered passage an answer was written from, as the RAG platform returned it.
+      properties:
+        n: { type: integer, example: 1 }
+        chunk_id: { type: string }
+        document_id: { type: string }
+        dochub_document_id: { type: string, format: uuid, nullable: true }
+        artifact_id: { type: string, format: uuid, nullable: true }
+        title: { type: string, nullable: true }
+        filename: { type: string, nullable: true }
+        heading_path: { type: array, items: { type: string } }
+        location: { type: string, nullable: true, example: "page 3" }
+        chunk_type: { type: string, example: prose }
+        snippet: { type: string }
+        score: { type: number }
+
+    ChatMessage:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        role: { type: string, enum: [User, Assistant] }
+        content: { type: string }
+        sources: { type: array, nullable: true, items: { $ref: "#/components/schemas/ChatSource" } }
+        cited: { type: array, nullable: true, items: { type: integer } }
+        model: { type: string, nullable: true }
+        error: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+    DocumentProcessedRequest:
+      type: object
+      required: [sourceDocumentId, chunkCount]
+      properties:
+        sourceDocumentId: { type: string, format: uuid }
+        documentVersionId:
+          type: string
+          format: uuid
+          nullable: true
+          description: The version that was indexed. A mismatch with the current version returns 409 stale_version.
+        chunkCount: { type: integer }
+        contentSha256: { type: string, nullable: true }
+        embeddingModel: { type: string, nullable: true }
+        pipelineVersion: { type: string, nullable: true }
+        skipped: { type: boolean, description: True when the content was already indexed and no work was done. }
+
+    DocumentFailedRequest:
+      type: object
+      required: [sourceDocumentId, error]
+      properties:
+        sourceDocumentId: { type: string, format: uuid }
+        documentVersionId: { type: string, format: uuid, nullable: true }
+        error: { type: string, example: "detect: unsupported_in_this_build: pdf extraction arrives in phase 3" }
+        stage: { type: string, nullable: true, example: detect }
+        permanent: { type: boolean }
+
+    ArtifactProcessedRequest:
+      type: object
+      required: [sourceDocumentId]
+      properties:
+        sourceDocumentId: { type: string, format: uuid, description: The source batch being closed. }
+
+    IngestionAck:
+      type: object
+      properties:
+        status: { type: string }
+        message: { type: string }
+
+    ArtifactProcessedResponse:
+      type: object
+      properties:
+        artifactStatus: { $ref: "#/components/schemas/ArtifactStatus" }
+        sourceStatus: { $ref: "#/components/schemas/SourceDocumentStatus" }
+        processed: { type: integer }
+        failed: { type: integer }
+        total: { type: integer }
 
     KnowledgeBase:
       type: object

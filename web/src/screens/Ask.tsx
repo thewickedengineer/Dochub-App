@@ -13,15 +13,14 @@ const SUGGESTIONS = [
 ];
 
 /**
- * Retrieval is owned by the indexing service that consumes the Service Bus
- * queue, so this screen shows the corpus the answer would be drawn from and
- * states plainly that the query endpoint is not wired up yet.
+ * The landing page for questions: what the answers are grounded in, and a box
+ * that hands the question to the Chat tab, where it is answered with sources.
  */
 export default function Ask() {
   const { user } = useApp();
   const navigate = useNavigate();
   const [question, setQuestion] = useState('');
-  const [asked, setAsked] = useState('');
+  const ask = (q: string) => navigate(`/chat?q=${encodeURIComponent(q.trim() || SUGGESTIONS[0])}`);
 
   const kb = useQuery(() => api.knowledgeBase(), []);
   const teams = useQuery(() => api.teams(), []);
@@ -50,7 +49,7 @@ export default function Ask() {
         <input
           value={question}
           onChange={e => setQuestion(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') setAsked(question || SUGGESTIONS[0]); }}
+          onKeyDown={e => { if (e.key === 'Enter') ask(question); }}
           placeholder="Ask a question about policies, claims, systems…"
           style={{
             border: 0, outline: 0, fontSize: 17, padding: '6px 2px',
@@ -59,50 +58,22 @@ export default function Ask() {
         />
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 13, color: c.muted, border: `1px solid ${c.border}`, borderRadius: 99, padding: '4px 10px' }}>
-            Scope: All teams
-          </span>
-          <span style={{ fontSize: 13, color: c.muted, border: `1px solid ${c.border}`, borderRadius: 99, padding: '4px 10px' }}>
-            Any source
+            Answered in Chat, with sources
           </span>
           <span style={{ flex: 1 }} />
-          <Button variant="primary" style={{ height: 34, padding: '0 16px' }} onClick={() => setAsked(question || SUGGESTIONS[0])}>
+          <Button variant="primary" style={{ height: 34, padding: '0 16px' }} onClick={() => ask(question)}>
             Ask ↵
           </Button>
         </div>
       </div>
 
-      {asked ? (
-        <div style={{
-          background: c.surface, border: `1px solid ${c.border}`, borderRadius: 14,
-          padding: '22px 24px', display: 'flex', flexDirection: 'column', gap: 16,
-          animation: 'slideUp .2s ease',
-        }}>
-          <div style={{ fontSize: 18, fontWeight: 600, letterSpacing: '-0.01em' }}>{asked}</div>
-          <div style={{
-            fontSize: 15, lineHeight: 1.65, color: c.body,
-            background: '#FBF1DF', borderRadius: 10, padding: '14px 16px',
-          }}>
-            Retrieval is not connected yet. The API stores and indexes documents and publishes
-            a <code style={{ fontFamily: "'Geist Mono', monospace", fontSize: 13 }}>dochub.processing.requested</code> event
-            per job; a retrieval service that consumes that queue and writes back embeddings
-            will make this screen answer from {stats?.indexed ?? 0} indexed documents.
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <Button style={{ height: 32, padding: '0 12px', fontSize: 13 }} onClick={() => { setAsked(''); setQuestion(''); }}>
-              New question
-            </Button>
-            <Button style={{ height: 32, padding: '0 12px', fontSize: 13 }} onClick={() => navigate('/knowledge-base')}>
-              View the index
-            </Button>
-          </div>
-        </div>
-      ) : (
+      {(
         <>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
             {SUGGESTIONS.map(s => (
               <button
                 key={s}
-                onClick={() => { setQuestion(s); setAsked(s); }}
+                onClick={() => ask(s)}
                 style={{
                   border: `1px solid ${c.border}`, background: c.surface, borderRadius: 99,
                   padding: '7px 14px', fontSize: 13, color: c.soft, cursor: 'pointer', fontFamily: 'inherit',

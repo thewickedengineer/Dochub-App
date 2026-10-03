@@ -17,7 +17,11 @@ public class DochubDbContext(DbContextOptions<DochubDbContext> options) : DbCont
     public DbSet<UploadedDocument> UploadedDocuments => Set<UploadedDocument>();
     public DbSet<Notification> Notifications => Set<Notification>();
     public DbSet<QueueMessage> QueueMessages => Set<QueueMessage>();
+    public DbSet<DocumentVersion> DocumentVersions => Set<DocumentVersion>();
     public DbSet<RecurringSyncSchedule> RecurringSyncSchedules => Set<RecurringSyncSchedule>();
+    public DbSet<ChatConversation> ChatConversations => Set<ChatConversation>();
+    public DbSet<NotificationDismissal> NotificationDismissals => Set<NotificationDismissal>();
+    public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -140,6 +144,8 @@ public class DochubDbContext(DbContextOptions<DochubDbContext> options) : DbCont
             e.Property(x => x.ChecksumSha256).HasMaxLength(64);
             e.Property(x => x.BlobPath).HasMaxLength(1200);
             e.Property(x => x.BlobUrl).HasMaxLength(2000);
+            e.Property(x => x.ContentMd5).HasMaxLength(64);
+            e.Property(x => x.BlobETag).HasMaxLength(100);
             e.Property(x => x.ExternalId).HasMaxLength(500);
             // Every document starts at revision 1; a sync that replaces its
             // content bumps it. Defaulted in the database so rows created by
@@ -174,6 +180,28 @@ public class DochubDbContext(DbContextOptions<DochubDbContext> options) : DbCont
                 .HasForeignKey(x => x.CreatedByUserId).OnDelete(DeleteBehavior.Restrict);
         });
 
+        b.Entity<DocumentVersion>(e =>
+        {
+            e.ToTable("document_versions");
+            e.Property(x => x.Name).HasMaxLength(500).IsRequired();
+            e.Property(x => x.RelativePath).HasMaxLength(1000).IsRequired();
+            e.Property(x => x.SourceLocation).HasMaxLength(1000).IsRequired();
+            e.Property(x => x.ExternalId).HasMaxLength(500);
+            e.Property(x => x.ContentType).HasMaxLength(200);
+            e.Property(x => x.BlobContainer).HasMaxLength(200).IsRequired();
+            e.Property(x => x.BlobPath).HasMaxLength(1200).IsRequired();
+            e.Property(x => x.BlobUrl).HasMaxLength(2000).IsRequired();
+            e.Property(x => x.BlobETag).HasMaxLength(100);
+            e.Property(x => x.ContentMd5).HasMaxLength(64).IsRequired();
+            e.Property(x => x.ContentSha256).HasMaxLength(64).IsRequired();
+            e.HasIndex(x => new { x.UploadedDocumentId, x.Revision }).IsUnique();
+            // "Have we seen these bytes for this name before?" — the sync's question.
+            e.HasIndex(x => new { x.ArtifactId, x.Name, x.UploadedAt });
+            e.HasIndex(x => x.ContentMd5);
+            e.HasOne(x => x.UploadedDocument).WithMany()
+                .HasForeignKey(x => x.UploadedDocumentId).OnDelete(DeleteBehavior.Cascade);
+        });
+
         b.Entity<QueueMessage>(e =>
         {
             e.ToTable("queue_messages");
@@ -199,10 +227,45 @@ public class DochubDbContext(DbContextOptions<DochubDbContext> options) : DbCont
             e.HasIndex(x => new { x.OrganizationId, x.UserId, x.CreatedAt });
         });
 
+        b.Entity<NotificationDismissal>(e =>
+        {
+            e.ToTable("notification_dismissals");
+            e.HasKey(x => new { x.UserId, x.NotificationId });
+            e.HasOne<Notification>().WithMany().HasForeignKey(x => x.NotificationId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne<User>().WithMany().HasForeignKey(x => x.UserId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        b.Entity<ChatConversation>(e =>
+        {
+            e.ToTable("chat_conversations");
+            e.Property(x => x.Title).HasMaxLength(200).IsRequired();
+            e.Property(x => x.ScopeLabel).HasMaxLength(300).IsRequired();
+            // The conversation list: one person's, in one org, most recent first.
+            e.HasIndex(x => new { x.OrganizationId, x.UserId, x.UpdatedAt });
+            e.HasMany(x => x.Messages).WithOne(x => x.Conversation)
+                .HasForeignKey(x => x.ConversationId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        b.Entity<ChatMessage>(e =>
+        {
+            e.ToTable("chat_messages");
+            e.Property(x => x.Content).IsRequired();
+            e.Property(x => x.Sources).HasColumnType("jsonb");
+            e.Property(x => x.Cited).HasColumnType("jsonb");
+            e.Property(x => x.Usage).HasColumnType("jsonb");
+            e.Property(x => x.Model).HasMaxLength(200);
+            e.Property(x => x.Error).HasMaxLength(2000);
+            e.HasIndex(x => new { x.ConversationId, x.CreatedAt });
+        });
+
         // snake_case every column so the schema reads naturally from psql.
         foreach (var entity in b.Model.GetEntityTypes())
             foreach (var prop in entity.GetProperties())
                 prop.SetColumnName(ToSnakeCase(prop.GetColumnName()));
+
+        // "ETag" would otherwise become e_tag.
+        b.Entity<UploadedDocument>().Property(x => x.BlobETag).HasColumnName("blob_etag");
+        b.Entity<DocumentVersion>().Property(x => x.BlobETag).HasColumnName("blob_etag");
     }
 
     private static string ToSnakeCase(string name)
