@@ -89,9 +89,10 @@ public class SourceTokenProvider(
     {
         SourceType.GoogleDrive => SourceProvider.Google,
         SourceType.SharePoint or SourceType.AzureDevOps => SourceProvider.Microsoft,
+        SourceType.GitHub => SourceProvider.GitHub,
         _ => throw new NotSupportedException($"{sourceType} does not sign in through an external provider.")
     };
 
     public static bool SupportsExternalSignIn(SourceType sourceType) =>
-        sourceType is SourceType.GoogleDrive or SourceType.SharePoint or SourceType.AzureDevOps;
+        sourceType is SourceType.GoogleDrive or SourceType.SharePoint or SourceType.AzureDevOps or SourceType.GitHub;
 }

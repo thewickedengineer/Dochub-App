@@ -149,7 +149,12 @@ public record SourceBreakdownDto(string SourceType, string Label, int Count, int
 public record SourceConnectionDto(
     Guid Id, string SourceType, string DisplayName, string Status,
     DateTimeOffset? ExpiresAt, string? Scopes, DateTimeOffset UpdatedAt,
-    string? Account, bool CanRefresh);
+    string? Account, bool CanRefresh,
+    /// <summary>Scheduled syncs that run under this connection, so removing it can say what stops.</summary>
+    int ScheduleCount = 0);
+
+/// <summary>A source that can be connected, and how: a sign-in window, or a pasted token.</summary>
+public record ConnectionOptionDto(string SourceType, string Label, bool SignIn, bool SignInConfigured, bool AcceptsToken);
 
 /// <summary>Kicks off the consent flow; the browser opens the returned URL in a popup.</summary>
 public record StartOAuthResponse(

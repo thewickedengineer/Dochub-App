@@ -11,7 +11,7 @@ import ScheduledUpdates from '../components/ScheduledUpdates';
 
 /** The connector tiles under "or import from a source". */
 const TILES = [
-  { source: 'SharePoint', label: 'Microsoft 365' },
+  { source: 'SharePoint', label: 'SharePoint / OneDrive' },
   { source: 'GoogleDrive', label: 'Google Drive' },
   { source: 'GitHub', label: 'GitHub' },
   { source: 'AzureDevOps', label: 'Azure DevOps' },

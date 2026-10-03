@@ -7,6 +7,7 @@ import Upload from './screens/Upload';
 import KnowledgeBase from './screens/KnowledgeBase';
 import Workspace from './screens/Workspace';
 import Members from './screens/Members';
+import Connections from './screens/Connections';
 import Ask from './screens/Ask';
 import Chat from './screens/Chat';
 import Platform from './screens/Platform';
@@ -83,6 +84,7 @@ function Router() {
         <Route path="/knowledge-base" element={<KnowledgeBase />} />
         <Route path="/workspace" element={<Workspace />} />
         <Route path="/members" element={<Members />} />
+        <Route path="/connections" element={<Connections />} />
         <Route path="/ask" element={<Ask />} />
         <Route path="/chat" element={<Chat />} />
         <Route path="/chat/:id" element={<Chat />} />

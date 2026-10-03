@@ -25,7 +25,7 @@ public static partial class Mapping
     public static string Label(this SourceType source) => source switch
     {
         SourceType.GitHub => "GitHub",
-        SourceType.SharePoint => "SharePoint",
+        SourceType.SharePoint => "SharePoint / OneDrive",
         SourceType.GoogleDrive => "Google Drive",
         SourceType.Local => "Local files",
         SourceType.AzureDevOps => "Azure DevOps",

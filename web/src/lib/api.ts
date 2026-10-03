@@ -3,7 +3,7 @@ import type {
   ChatEvent, ChatScope, KnowledgeBaseDto, MemberDto, OwnerDto, PlatformOrganizationDto,
   NotificationListDto, OrganizationDto, PendingSource, ProcessAcknowledgement,
   ResolvedLinkDto, SourceConnectionDto, SourceDocumentDetailDto, SourceDocumentDto,
-  StagedFileDto, StartOAuthResponse, SyncScheduleDto, SyncScheduleRequest, SyncRunResult, TeamDto,
+  StagedFileDto, StartOAuthResponse, ConnectionOptionDto, BrowseResult, SyncScheduleDto, SyncScheduleRequest, SyncRunResult, TeamDto,
 } from './types';
 
 const BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:5080';
@@ -180,6 +180,8 @@ export const api = {
 
   // Connections
   connections: () => request<SourceConnectionDto[]>('/api/connections'),
+  /** Which sources can be connected, and whether each has a sign-in window set up. */
+  connectionOptions: () => request<ConnectionOptionDto[]>('/api/connections/options'),
   /** Asks the API for the provider's consent URL; the caller opens it in a popup. */
   startOAuth: (sourceType: string) =>
     request<StartOAuthResponse>(`/api/connections/oauth/${sourceType}/start`),
@@ -195,6 +197,14 @@ export const api = {
     request<ResolvedLinkDto>('/api/connections/resolve-link', {
       method: 'POST', body: json({ link, sourceConnectionId }),
     }),
+
+  /** Lists what a connected SharePoint / OneDrive or Google account can see at a location. */
+  browse: (connectionId: string, location: string, q?: string, cursor?: string) => {
+    const params = new URLSearchParams({ location });
+    if (q) params.set('q', q);
+    if (cursor) params.set('cursor', cursor);
+    return request<BrowseResult>(`/api/connections/${connectionId}/browse?${params}`);
+  },
 
   disconnect: (connectionId: string) => request<void>(`/api/connections/${connectionId}`, { method: 'DELETE' }),
 

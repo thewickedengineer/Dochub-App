@@ -139,10 +139,24 @@ public class OAuthOptions
         Scopes = "openid email offline_access Files.Read.All Sites.Read.All"
     };
 
+    /// <summary>
+    /// A GitHub OAuth App (github.com/settings/developers). Its callback URL is
+    /// <see cref="RedirectUri"/>. GitHub requires the client secret for the exchange.
+    /// </summary>
+    public OAuthProviderOptions GitHub { get; set; } = new()
+    {
+        AuthorizeEndpoint = "https://github.com/login/oauth/authorize",
+        TokenEndpoint = "https://github.com/login/oauth/access_token",
+        // repo is GitHub's only scope that reads private repositories; OAuth Apps
+        // have no read-only variant. read:user names the account on the connection.
+        Scopes = "repo read:user"
+    };
+
     public OAuthProviderOptions For(SourceProvider provider) => provider switch
     {
         SourceProvider.Google => Google,
         SourceProvider.Microsoft => Microsoft,
+        SourceProvider.GitHub => GitHub,
         _ => throw new ArgumentOutOfRangeException(nameof(provider))
     };
 }
@@ -172,7 +186,7 @@ public class OAuthProviderOptions
 }
 
 /// <summary>The identity provider behind a source, as opposed to the source itself.</summary>
-public enum SourceProvider { Google, Microsoft }
+public enum SourceProvider { Google, Microsoft, GitHub }
 
 public class IngestionOptions
 {

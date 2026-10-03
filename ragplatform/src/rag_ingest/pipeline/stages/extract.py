@@ -84,13 +84,15 @@ class ExtractStage:
 
         args = (ctx.document_id, ctx.content_hash or "", ctx.mime or "", ctx.raw or b"")
 
+        # Every extractor runs off the event loop: a large file must not stall the
+        # other documents of the batch, or the lock renewal that keeps the batch ours.
         if ctx.family == "markdown":
-            model = markdown.extract_notebook(*args) if PurePosixPath(path).suffix.lower() == ".ipynb" \
-                else markdown.extract(*args)
+            extract = markdown.extract_notebook if PurePosixPath(path).suffix.lower() == ".ipynb" else markdown.extract
+            model = await asyncio.to_thread(extract, *args)
         elif ctx.family == "code":
-            model = code.extract(*args, path=path)
+            model = await asyncio.to_thread(code.extract, *args, path=path)
         elif ctx.family == "text":
-            model = text.extract(*args)
+            model = await asyncio.to_thread(text.extract, *args)
         elif ctx.family == "spreadsheet":
             model = await asyncio.to_thread(spreadsheet.extract, *args, path, self.settings)
         elif ctx.family in DOCLING_FAMILIES:

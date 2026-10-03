@@ -206,8 +206,8 @@ public class OAuthFlowTests
         Assert.Equal(expected, SourceTokenProvider.ProviderFor(source));
 
     [Theory]
-    [InlineData(SourceType.GitHub)]
     [InlineData(SourceType.Local)]
+    [InlineData(SourceType.Confluence)]
     public void Sources_without_an_external_provider_say_so(SourceType source)
     {
         Assert.False(SourceTokenProvider.SupportsExternalSignIn(source));

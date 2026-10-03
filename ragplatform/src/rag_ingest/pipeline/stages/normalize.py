@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import unicodedata
 from collections import Counter
@@ -85,6 +86,10 @@ class NormalizeStage:
         self.settings = settings
 
     async def run(self, ctx: PipelineContext) -> PipelineContext:
+        # Cleaning and language detection are CPU work; keep them off the event loop.
+        return await asyncio.to_thread(self._normalize, ctx)
+
+    def _normalize(self, ctx: PipelineContext) -> PipelineContext:
         model = ctx.model
         assert model is not None
 

@@ -134,6 +134,9 @@ def classify(path: str, raw: bytes) -> tuple[str, str]:
 
     if mime in _BINARY_MIME:
         return mime, _BINARY_MIME[mime]
+    # Icons and fonts sniff as images, but there is nothing in them to read.
+    if suffix in _NOT_INDEXABLE:
+        raise PermanentError("not_indexable", f"{suffix} files carry no text")
     if mime.startswith(("image/", "audio/", "video/")):
         return mime, "image" if mime.startswith("image/") else "audio_video"
     if suffix in _EXTENSION_FAMILY and not looks_textual(raw):

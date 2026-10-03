@@ -100,6 +100,7 @@ builder.Services.AddSingleton<ISsoValidator, SsoValidator>();
 builder.Services.AddSingleton<ITokenProtector, TokenProtector>();
 builder.Services.AddSingleton<IOAuthFlowService, OAuthFlowService>();
 builder.Services.AddSingleton<IShareLinkResolver, ShareLinkResolver>();
+builder.Services.AddSingleton<ISourceBrowser, SourceBrowser>();
 builder.Services.AddScoped<ISourceTokenProvider, SourceTokenProvider>();
 builder.Services.AddSingleton<IBlobStorageService, BlobStorageService>();
 

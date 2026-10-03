@@ -235,12 +235,33 @@ public class SharePointExtractor(IHttpClientFactory http) : ISourceExtractor
         if (string.IsNullOrWhiteSpace(context.AccessToken))
             throw new InvalidOperationException("SharePoint upload requires a connected Microsoft account.");
 
+        var client = http.CreateClient("graph");
+        client.DefaultRequestHeaders.Authorization = new("Bearer", context.AccessToken);
+
+        // Picked in the browser: any mix of folders and files, possibly across drives.
+        var picked = PickedItem.Read(context.Options);
+        if (picked.Count > 0)
+        {
+            foreach (var item in picked)
+            {
+                if (item.DriveId is null)
+                    throw new InvalidOperationException($"'{item.Name}' was picked without its drive. Pick it again.");
+                if (!item.Folder)
+                {
+                    yield return await GraphItems.FileAsync(client, item.DriveId, item.Id, ct);
+                    continue;
+                }
+                // With several picks, each folder keeps its own name so files cannot collide.
+                var prefix = picked.Count == 1 ? "" : item.Name;
+                await foreach (var file in GraphItems.EnumerateAsync(client, item.DriveId, item.Id, prefix, ct))
+                    yield return file;
+            }
+            yield break;
+        }
+
         var driveId = context.Options.GetStringOrDefault("driveId")
             ?? throw new InvalidOperationException("SharePoint upload requires 'driveId'.");
         var folderId = context.Options.GetStringOrDefault("itemId") ?? "root";
-
-        var client = http.CreateClient("graph");
-        client.DefaultRequestHeaders.Authorization = new("Bearer", context.AccessToken);
 
         await foreach (var item in GraphItems.EnumerateAsync(client, driveId, folderId, "", ct))
             yield return item;
@@ -266,12 +287,25 @@ public class GoogleDriveExtractor(IHttpClientFactory http) : ISourceExtractor
         if (string.IsNullOrWhiteSpace(context.AccessToken))
             throw new InvalidOperationException("Google Drive upload requires a connected Google account.");
 
-        var folderId = context.Options.GetStringOrDefault("folderId") ?? "root";
         var client = http.CreateClient("gdrive");
         client.DefaultRequestHeaders.Authorization = new("Bearer", context.AccessToken);
 
         var queue = new Queue<(string Id, string Path)>();
-        queue.Enqueue((folderId, ""));
+
+        // Picked in the browser: files are fetched one by one, folders walked like any other.
+        var picked = PickedItem.Read(context.Options);
+        foreach (var item in picked)
+        {
+            if (item.Folder) { queue.Enqueue((item.Id, picked.Count == 1 ? "" : item.Name)); continue; }
+
+            using var meta = await client.GetAsync(
+                $"files/{item.Id}?fields=id,name,mimeType,size,modifiedTime&supportsAllDrives=true", ct);
+            meta.EnsureSuccessStatusCode();
+            using var one = JsonDocument.Parse(await meta.Content.ReadAsStringAsync(ct));
+            yield return DriveDocument(client, one.RootElement, "");
+        }
+        if (picked.Count == 0)
+            queue.Enqueue((context.Options.GetStringOrDefault("folderId") ?? "root", ""));
 
         while (queue.Count > 0)
         {
@@ -298,32 +332,40 @@ public class GoogleDriveExtractor(IHttpClientFactory http) : ISourceExtractor
                         continue;
                     }
 
-                    var export = ExportMap.TryGetValue(mime, out var ex) ? ex : default;
-                    var outputName = export.Extension is not null ? name + export.Extension : name;
-                    var relative = prefix.Length == 0 ? outputName : $"{prefix}/{outputName}";
-                    var size = file.TryGetProperty("size", out var sz) && long.TryParse(sz.GetString(), out var parsed) ? parsed : 0;
-
-                    yield return new ExtractedDocument(
-                        Name: outputName,
-                        RelativePath: relative,
-                        SourceLocation: $"drive:/{relative}",
-                        ContentType: export.Mime ?? mime,
-                        ExternalId: fileId,
-                        SizeHint: size,
-                        OpenAsync: async token =>
-                        {
-                            var downloadUrl = export.Mime is not null
-                                ? $"files/{fileId}/export?mimeType={Uri.EscapeDataString(export.Mime)}"
-                                : $"files/{fileId}?alt=media&supportsAllDrives=true";
-                            var raw = await client.GetAsync(downloadUrl, HttpCompletionOption.ResponseHeadersRead, token);
-                            raw.EnsureSuccessStatusCode();
-                            return await raw.Content.ReadAsStreamAsync(token);
-                        });
+                    yield return DriveDocument(client, file, prefix);
                 }
 
                 pageToken = doc.RootElement.TryGetProperty("nextPageToken", out var nt) ? nt.GetString() : null;
             } while (pageToken is not null);
         }
+    }
+
+    private static ExtractedDocument DriveDocument(HttpClient client, JsonElement file, string prefix)
+    {
+        var fileId = file.GetProperty("id").GetString()!;
+        var name = file.GetProperty("name").GetString()!;
+        var mime = file.GetProperty("mimeType").GetString()!;
+        var export = ExportMap.TryGetValue(mime, out var ex) ? ex : default;
+        var outputName = export.Extension is not null ? name + export.Extension : name;
+        var relative = prefix.Length == 0 ? outputName : $"{prefix}/{outputName}";
+        var size = file.TryGetProperty("size", out var sz) && long.TryParse(sz.GetString(), out var parsed) ? parsed : 0;
+
+        return new ExtractedDocument(
+            Name: outputName,
+            RelativePath: relative,
+            SourceLocation: $"drive:/{relative}",
+            ContentType: export.Mime ?? mime,
+            ExternalId: fileId,
+            SizeHint: size,
+            OpenAsync: async token =>
+            {
+                var downloadUrl = export.Mime is not null
+                    ? $"files/{fileId}/export?mimeType={Uri.EscapeDataString(export.Mime)}"
+                    : $"files/{fileId}?alt=media&supportsAllDrives=true";
+                var raw = await client.GetAsync(downloadUrl, HttpCompletionOption.ResponseHeadersRead, token);
+                raw.EnsureSuccessStatusCode();
+                return await raw.Content.ReadAsStreamAsync(token);
+            });
     }
 }
 
@@ -387,8 +429,51 @@ public class AzureDevOpsExtractor(IHttpClientFactory http) : ISourceExtractor
     }
 }
 
+/// <summary>A folder or file chosen in the source browser, as stored in the upload's options.</summary>
+public record PickedItem(string Id, string? DriveId, bool Folder, string Name)
+{
+    public static IReadOnlyList<PickedItem> Read(JsonElement options)
+    {
+        if (options.ValueKind != JsonValueKind.Object
+            || !options.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array)
+            return [];
+        return items.EnumerateArray()
+            .Where(x => x.ValueKind == JsonValueKind.Object && x.TryGetProperty("id", out _))
+            .Select(x => new PickedItem(
+                x.GetProperty("id").GetString()!,
+                x.GetStringOrDefault("driveId"),
+                x.TryGetProperty("folder", out var f) && f.ValueKind == JsonValueKind.True,
+                x.GetStringOrDefault("name") ?? x.GetProperty("id").GetString()!))
+            .ToList();
+    }
+}
+
 internal static class GraphItems
 {
+    /// <summary>A single picked file, fetched by id.</summary>
+    public static async Task<ExtractedDocument> FileAsync(HttpClient client, string driveId, string id, CancellationToken ct)
+    {
+        using var response = await client.GetAsync($"drives/{driveId}/items/{id}?$select=id,name,size,file", ct);
+        response.EnsureSuccessStatusCode();
+        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+        var item = doc.RootElement;
+        var name = item.GetProperty("name").GetString()!;
+        var mime = item.TryGetProperty("file", out var file) && file.TryGetProperty("mimeType", out var mt) ? mt.GetString() : null;
+        return Document(client, driveId, id, name, name, item.TryGetProperty("size", out var sz) ? sz.GetInt64() : 0, mime);
+    }
+
+    private static ExtractedDocument Document(HttpClient client, string driveId, string id, string name,
+        string relative, long size, string? mime) =>
+        new(Name: name, RelativePath: relative, SourceLocation: $"/{relative}",
+            ContentType: mime ?? MimeTypes.For(name), ExternalId: id, SizeHint: size,
+            OpenAsync: async token =>
+            {
+                var raw = await client.GetAsync($"drives/{driveId}/items/{id}/content",
+                    HttpCompletionOption.ResponseHeadersRead, token);
+                raw.EnsureSuccessStatusCode();
+                return await raw.Content.ReadAsStreamAsync(token);
+            });
+
     public static async IAsyncEnumerable<ExtractedDocument> EnumerateAsync(
         HttpClient client, string driveId, string itemId, string prefix,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
@@ -413,16 +498,7 @@ internal static class GraphItems
                 var size = item.TryGetProperty("size", out var sz) ? sz.GetInt64() : 0;
                 var mime = file.TryGetProperty("mimeType", out var mt) ? mt.GetString() : null;
 
-                yield return new ExtractedDocument(
-                    Name: name, RelativePath: relative, SourceLocation: $"/{relative}",
-                    ContentType: mime ?? MimeTypes.For(name), ExternalId: id, SizeHint: size,
-                    OpenAsync: async token =>
-                    {
-                        var raw = await client.GetAsync($"drives/{driveId}/items/{id}/content",
-                            HttpCompletionOption.ResponseHeadersRead, token);
-                        raw.EnsureSuccessStatusCode();
-                        return await raw.Content.ReadAsStreamAsync(token);
-                    });
+                yield return Document(client, driveId, id, name, relative, size, mime);
             }
 
             foreach (var (childId, childName) in children)

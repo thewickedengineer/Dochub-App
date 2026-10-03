@@ -11,6 +11,7 @@ const NAV = [
   { key: '/knowledge-base', label: 'Knowledge base', icon: '▤' },
   { key: '/workspace', label: 'Workspace', icon: '▦' },
   { key: '/members', label: 'Members', icon: '◎' },
+  { key: '/connections', label: 'Connections', icon: '⇄' },
   { key: '/ask', label: 'Ask', icon: '✦' },
   { key: '/chat', label: 'Chat', icon: '💬' },
 ];

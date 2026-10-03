@@ -14,7 +14,7 @@ public record OAuthTokens(
 
 /// <summary>
 /// Runs the delegated OAuth dance that lets a user point Dochub at their own
-/// Drive or SharePoint.
+/// Drive, SharePoint or private GitHub repositories.
 ///
 /// Authorization Code with PKCE, and the code is exchanged **server-side** so the
 /// refresh token never reaches the browser. That refresh token is what makes a
@@ -170,10 +170,17 @@ public class OAuthFlowService(
         OAuthProviderOptions settings, Dictionary<string, string> form, CancellationToken ct)
     {
         var client = http.CreateClient("oauth");
-        using var response = await client.PostAsync(settings.ResolvedTokenEndpoint, new FormUrlEncodedContent(form), ct);
+        using var request = new HttpRequestMessage(HttpMethod.Post, settings.ResolvedTokenEndpoint)
+        {
+            Content = new FormUrlEncodedContent(form)
+        };
+        // GitHub answers form-encoded unless JSON is asked for.
+        request.Headers.Accept.ParseAdd("application/json");
+        using var response = await client.SendAsync(request, ct);
         var body = await response.Content.ReadAsStringAsync(ct);
 
-        if (!response.IsSuccessStatusCode)
+        // GitHub reports a bad code with 200 and an error body.
+        if (!response.IsSuccessStatusCode || TryReadError(body) is not null)
         {
             // The provider's own error is far more useful than a generic failure.
             var detail = TryReadError(body) ?? $"{(int)response.StatusCode} {response.StatusCode}";
@@ -187,14 +194,15 @@ public class OAuthFlowService(
         if (string.IsNullOrWhiteSpace(accessToken))
             throw new InvalidOperationException("The provider returned no access token.");
 
-        var expiresIn = root.TryGetProperty("expires_in", out var ei) && ei.TryGetInt32(out var seconds)
-            ? seconds
-            : 3600;
+        // A GitHub OAuth App token does not expire, and says so by sending no expires_in.
+        DateTimeOffset? expiresAt = root.TryGetProperty("expires_in", out var ei) && ei.TryGetInt32(out var seconds)
+            ? DateTimeOffset.UtcNow.AddSeconds(seconds)
+            : null;
 
         return new OAuthTokens(
             accessToken,
             root.TryGetProperty("refresh_token", out var rt) ? rt.GetString() : null,
-            DateTimeOffset.UtcNow.AddSeconds(expiresIn),
+            expiresAt,
             root.TryGetProperty("scope", out var sc) ? sc.GetString() : settings.Scopes,
             ReadAccount(root));
     }
@@ -228,7 +236,9 @@ public class OAuthFlowService(
         {
             using var json = JsonDocument.Parse(body);
             var root = json.RootElement;
-            var code = root.TryGetProperty("error", out var e) ? e.GetString() : null;
+            if (root.ValueKind != JsonValueKind.Object) return null;
+            var code = root.TryGetProperty("error", out var e) && e.ValueKind == JsonValueKind.String ? e.GetString() : null;
+            if (code is null) return null;
             var description = root.TryGetProperty("error_description", out var d) ? d.GetString() : null;
             return description is null ? code : $"{code} — {description}";
         }

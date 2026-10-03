@@ -28,7 +28,7 @@ export const mono = "'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospac
 /** Source-system chips: mark, background and foreground. */
 export const SRC: Record<string, { label: string; mark: string; bg: string; fg: string }> = {
   GitHub: { label: 'GitHub', mark: 'GH', bg: '#16181D', fg: '#fff' },
-  SharePoint: { label: 'SharePoint', mark: 'SP', bg: '#E3F1EE', fg: '#0B6A5A' },
+  SharePoint: { label: 'SharePoint / OneDrive', mark: 'SP', bg: '#E3F1EE', fg: '#0B6A5A' },
   GoogleDrive: { label: 'Google Drive', mark: 'GD', bg: '#FDF1DC', fg: '#935700' },
   Local: { label: 'Local files', mark: 'LF', bg: '#ECEEF2', fg: '#3D434D' },
   AzureDevOps: { label: 'Azure DevOps', mark: 'AZ', bg: '#E3EEFB', fg: '#0B5CAD' },

@@ -151,8 +151,10 @@ public static class IngestionEndpoints
         var reason = string.IsNullOrWhiteSpace(request.Stage) ? request.Error : $"{request.Stage}: {request.Error}";
 
         // A transient failure the service will retry is noted but left in flight.
+        // A file that can never be indexed — a vendored library, an icon, an empty
+        // file — is skipped rather than failed: nothing went wrong, and nothing to fix.
         if (request.Permanent)
-            document.Status = DocumentStatus.Failed;
+            document.Status = IsSkip(request.Error) ? DocumentStatus.Skipped : DocumentStatus.Failed;
         document.Error = reason.Length > 2000 ? reason[..2000] : reason;
         document.UpdatedAt = DateTimeOffset.UtcNow;
 
@@ -219,13 +221,28 @@ public static class IngestionEndpoints
             source.Status == SourceDocumentStatus.Processed ? "Processing complete" : "Processing finished with errors",
             $"{source.Reference} · {source.ProcessedDocumentCount} of {source.TotalDocuments} document(s) from " +
             $"{artifact.Name} are searchable" +
-            (source.FailedDocumentCount > 0 ? $"; {source.FailedDocumentCount} failed." : "."),
+            (source.FailedDocumentCount > 0 ? $"; {source.FailedDocumentCount} failed" : "") +
+            (await SkippedCountAsync(db, source, ct) is > 0 and var skipped ? $"; {skipped} skipped (nothing to index)." : "."),
             source.Status == SourceDocumentStatus.Processed ? NotificationSeverity.Success : NotificationSeverity.Warning,
             "sourceDocument", source.Id, ct);
 
         return Results.Ok(new ArtifactProcessedResponse(
             artifact.Status.ToString(), source.Status.ToString(),
             source.ProcessedDocumentCount, source.FailedDocumentCount, source.TotalDocuments));
+    }
+
+    /// <summary>The vector service's error codes for content there is nothing to read in.</summary>
+    private static readonly HashSet<string> SkipCodes = new(StringComparer.Ordinal)
+    {
+        "not_indexable", "unsupported_format", "unsupported_in_this_build",
+        "no_extractor", "extractor_disabled", "low_quality_extraction", "no_chunks"
+    };
+
+    /// <summary>Errors arrive as "code: detail".</summary>
+    public static bool IsSkip(string error)
+    {
+        var colon = error.IndexOf(':');
+        return colon > 0 && SkipCodes.Contains(error[..colon].Trim());
     }
 
     public static ArtifactStatus ArtifactStatusFrom(IReadOnlyCollection<DocumentStatus> states)
@@ -241,6 +258,9 @@ public static class IngestionEndpoints
     }
 
     /// <summary>Counts from the rows, so a repeated or out-of-order callback cannot drift them.</summary>
+    private static Task<int> SkippedCountAsync(DochubDbContext db, SourceDocument source, CancellationToken ct) =>
+        db.UploadedDocuments.CountAsync(x => x.SourceDocumentId == source.Id && x.Status == DocumentStatus.Skipped, ct);
+
     private static async Task RecountAsync(DochubDbContext db, SourceDocument source, CancellationToken ct)
     {
         var counts = await db.UploadedDocuments

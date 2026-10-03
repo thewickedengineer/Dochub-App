@@ -136,11 +136,33 @@ export interface SourceConnectionDto {
   account?: string;
   /** True when a refresh token is stored, so the connection renews itself. */
   canRefresh: boolean;
+  /** Scheduled syncs that run under this connection. */
+  scheduleCount: number;
+}
+
+/** What a picked entry needs to be imported: its id, and its drive for SharePoint / OneDrive. */
+export interface BrowseSelection { id: string; driveId?: string | null; folder: boolean; name: string }
+
+/** A row in the file browser: openable when it has a location, pickable when it has a selection. */
+export interface BrowseItem {
+  name: string;
+  /** folder, file, site, library, or place:<kind> for the top-level entries. */
+  kind: string;
+  location?: string | null;
+  selection?: BrowseSelection | null;
+  size?: number | null; modifiedAt?: string | null; mimeType?: string | null; detail?: string | null;
+}
+export interface BrowseResult { items: BrowseItem[]; cursor?: string | null; notice?: string | null }
+
+/** A source that can be connected: through a sign-in window, a pasted token, or either. */
+export interface ConnectionOptionDto {
+  sourceType: string; label: string;
+  signIn: boolean; signInConfigured: boolean; acceptsToken: boolean;
 }
 
 export interface StartOAuthResponse {
   authorizeUrl: string;
-  provider: 'Google' | 'Microsoft';
+  provider: 'Google' | 'Microsoft' | 'GitHub';
   sourceType: string;
 }
 

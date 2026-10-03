@@ -47,12 +47,12 @@ public partial class ShareLinkResolver(IHttpClientFactory http, ILogger<ShareLin
 
         if (host.EndsWith("sharepoint.com", StringComparison.Ordinal)
             || host.EndsWith("sharepoint.us", StringComparison.Ordinal)
-            || host is "1drv.ms"
-            || host.EndsWith("-my.sharepoint.com", StringComparison.Ordinal))
+            || host is "1drv.ms" or "onedrive.live.com" or "onedrive.com"
+            || host.EndsWith(".onedrive.com", StringComparison.Ordinal))
             return await ResolveMicrosoftAsync(uri, accessToken, ct);
 
         throw new ArgumentException(
-            $"'{uri.Host}' is not a Google Drive or SharePoint link. Paste a link from one of those.", nameof(link));
+            $"'{uri.Host}' is not a Google Drive, SharePoint or OneDrive link. Paste a link from one of those.", nameof(link));
     }
 
     private async Task<ResolvedLink> ResolveGoogleAsync(Uri uri, string accessToken, CancellationToken ct)
@@ -103,6 +103,36 @@ public partial class ShareLinkResolver(IHttpClientFactory http, ILogger<ShareLin
             new Dictionary<string, object?> { ["folderId"] = id });
     }
 
+    /// <summary>
+    /// The Graph path for a personal OneDrive address-bar URL, or null when the URL
+    /// carries no drive and item. Two shapes exist: the classic
+    /// <c>?cid=…&amp;id=CID!123</c> (or <c>resid=CID!123</c>) and the newer
+    /// <c>?id=/personal/{cid}/Documents/Folder</c>.
+    /// </summary>
+    public static string? OneDriveItemPath(Uri uri)
+    {
+        if (!uri.Host.EndsWith("onedrive.live.com", StringComparison.OrdinalIgnoreCase)) return null;
+        var query = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(uri.Query);
+        string? Get(string key) => query.TryGetValue(key, out var v) ? v.ToString() : null;
+
+        var id = Get("id") ?? Get("resid");
+        if (string.IsNullOrWhiteSpace(id)) return null;
+
+        if (id.StartsWith("/personal/", StringComparison.OrdinalIgnoreCase))
+        {
+            var parts = id.Trim('/').Split('/', 4);      // personal, cid, Documents, rest
+            if (parts.Length < 3) return null;
+            var drive = parts[1];
+            var path = parts.Length == 4 ? parts[3] : "";
+            return path.Length == 0
+                ? $"drives/{drive}/root"
+                : $"drives/{drive}/root:/{string.Join('/', path.Split('/').Select(Uri.EscapeDataString))}:";
+        }
+
+        var cid = Get("cid") ?? (id.Contains('!') ? id[..id.IndexOf('!')] : null);
+        return string.IsNullOrWhiteSpace(cid) ? null : $"drives/{cid}/items/{Uri.EscapeDataString(id)}";
+    }
+
     private async Task<ResolvedLink> ResolveMicrosoftAsync(Uri uri, string accessToken, CancellationToken ct)
     {
         // Graph resolves any sharing URL — including the long ?id=/sourcedoc= ones
@@ -113,14 +143,23 @@ public partial class ShareLinkResolver(IHttpClientFactory http, ILogger<ShareLin
         var client = http.CreateClient("graph");
         client.DefaultRequestHeaders.Authorization = new("Bearer", accessToken);
 
-        using var response = await client.GetAsync(
-            $"shares/{encoded}/driveItem?$select=id,name,folder,file,parentReference,webUrl", ct);
+        const string select = "?$select=id,name,folder,file,parentReference,webUrl";
+        var response = await client.GetAsync($"shares/{encoded}/driveItem{select}", ct);
 
+        // A personal OneDrive folder's address bar is not a sharing link, but it
+        // names the drive and the item, which Graph can read directly.
+        if (!response.IsSuccessStatusCode && OneDriveItemPath(uri) is { } direct)
+        {
+            response.Dispose();
+            response = await client.GetAsync(direct + select, ct);
+        }
+
+        using var lookup = response;
         if (!response.IsSuccessStatusCode)
             throw new InvalidOperationException(response.StatusCode switch
             {
                 System.Net.HttpStatusCode.NotFound =>
-                    "That SharePoint location does not exist, or the signed-in account cannot see it.",
+                    "That SharePoint or OneDrive location does not exist, or the signed-in account cannot see it.",
                 System.Net.HttpStatusCode.Forbidden or System.Net.HttpStatusCode.Unauthorized =>
                     "The signed-in Microsoft account does not have access to that location.",
                 _ => $"Microsoft Graph rejected the lookup ({(int)response.StatusCode})."
@@ -140,12 +179,15 @@ public partial class ShareLinkResolver(IHttpClientFactory http, ILogger<ShareLin
             throw new InvalidOperationException(
                 "Microsoft Graph did not say which drive that folder belongs to. Try the folder's own link.");
 
-        log.LogInformation("Resolved SharePoint link to {Name} ({ItemId})", name, itemId);
+        var where = parent.TryGetProperty("driveType", out var driveType)
+                    && driveType.GetString() is "personal" or "business"
+            ? "OneDrive" : "SharePoint";
+        log.LogInformation("Resolved {Where} link to {Name} ({ItemId})", where, name, itemId);
 
         return new ResolvedLink(
             SourceType.SharePoint,
             name,
-            $"SharePoint › {name}",
+            $"{where} › {name}",
             new Dictionary<string, object?>
             {
                 ["driveId"] = driveId.GetString(),

@@ -2,11 +2,14 @@ import { useState } from 'react';
 import { api } from '../lib/api';
 import { connectWithProvider } from '../lib/oauth';
 import { useApp } from '../lib/AppContext';
+import { useQuery } from '../lib/hooks';
 import { c, srcOf } from '../theme';
 import type {
-  ArtifactSummaryDto, PendingSource, ResolvedLinkDto, SourceConnectionDto,
+  ArtifactSummaryDto, BrowseSelection, PendingSource, ResolvedLinkDto, SourceConnectionDto,
 } from '../lib/types';
 import { Button, Field, Input, Modal } from './ui';
+import RemoveConnection from './RemoveConnection';
+import FileBrowser from './FileBrowser';
 import SyncSchedulePicker, {
   emptyDraft, toRequest, type ScheduleDraft, type UploadMode,
 } from './SyncSchedulePicker';
@@ -21,7 +24,7 @@ const SOURCES = ['GitHub', 'SharePoint', 'GoogleDrive', 'Local', 'AzureDevOps', 
 
 const AUTH_COPY: Record<string, { copy: string; button: string }> = {
   SharePoint: {
-    copy: "SharePoint requires a Microsoft access token. You'll be redirected to Microsoft to grant read access to the selected sites.",
+    copy: "Sign in with a Microsoft work, school or personal account to read SharePoint sites and OneDrive folders.",
     button: 'Sign in with Microsoft',
   },
   GoogleDrive: {
@@ -70,16 +73,22 @@ export default function AddSourceModal({
   const [azWiki, setAzWiki] = useState('');
   const [link, setLink] = useState('');
   const [resolved, setResolved] = useState<ResolvedLinkDto | null>(null);
+  const [picked, setPicked] = useState<BrowseSelection[]>([]);
+  const [browsing, setBrowsing] = useState(false);
   const [resolving, setResolving] = useState(false);
   const [mode, setMode] = useState<UploadMode>('once');
   const [schedule, setSchedule] = useState<ScheduleDraft>(emptyDraft);
 
   const connection = connections.find(x => x.sourceType === source && x.status === 'Connected');
+  const options = useQuery(() => api.connectionOptions(), []);
+  const gitHubSignIn = options.data?.some(x => x.sourceType === 'GitHub' && x.signInConfigured) ?? false;
+  const [pasteToken, setPasteToken] = useState(false);
+  const [removing, setRemoving] = useState<SourceConnectionDto | null>(null);
   const needsAuth = NEEDS_TOKEN.has(source) && !connection;
 
   // Recurring needs somewhere to go back to and a token to go back with.
   const syncBlockedBecause = !SYNCABLE.has(source)
-    ? `${srcOf(source).label} can't be kept in sync — only SharePoint, Google Drive and GitHub locations can be re-read on a schedule.`
+    ? `${srcOf(source).label} can't be kept in sync — only SharePoint / OneDrive, Google Drive and GitHub locations can be re-read on a schedule.`
     : !connection && SYNC_NEEDS_CONNECTION.has(source)
       ? `Connect ${srcOf(source).label} first: recurring updates run unattended and need a stored token.`
       : undefined;
@@ -139,15 +148,18 @@ export default function AddSourceModal({
     }
   };
 
-  const disconnectGitHub = async () => {
-    if (!connection) return;
+  const signInGitHub = async () => {
     setBusy(true);
+    setError(null);
     try {
-      await api.disconnect(connection.id);
-      showToast({ icon: '✓', dot: '#2E9A64', title: 'GitHub disconnected', body: 'Private repositories are no longer reachable.' });
+      const created = await connectWithProvider('GitHub');
+      showToast({
+        icon: '✓', dot: '#2E9A64', title: 'GitHub connected',
+        body: created.account ? `Reading repositories as ${created.account}.` : 'Private repositories you can read are reachable.',
+      });
       invalidate();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not disconnect GitHub.');
+      setError(e instanceof Error ? e.message : 'Could not connect GitHub.');
     } finally {
       setBusy(false);
     }
@@ -162,6 +174,7 @@ export default function AddSourceModal({
     try {
       const result = await api.resolveLink(link.trim(), connection.id);
       setResolved(result);
+      setPicked([]);
     } catch (e) {
       setResolved(null);
       setError(e instanceof Error ? e.message : 'Could not read that link.');
@@ -183,11 +196,14 @@ export default function AddSourceModal({
     });
   };
 
+  const pickedSummary = () =>
+    picked.length <= 3 ? picked.map(x => x.name).join(', ') : `${picked.slice(0, 2).map(x => x.name).join(', ')} and ${picked.length - 2} more`;
+
   const describeSource = () => {
     switch (source) {
       case 'GitHub': return `${repository.trim()} · ${branch || 'main'}${path ? ` · /${path}` : ''}${fileTypes ? ` · ${fileTypes}` : ''}`;
       case 'SharePoint':
-      case 'GoogleDrive': return resolved?.displayName ?? 'Linked folder';
+      case 'GoogleDrive': return picked.length ? pickedSummary() : resolved?.displayName ?? 'Linked folder';
       case 'AzureDevOps': return `${azOrg} / ${azProject} / ${azWiki}`;
       default: return srcOf(source).label;
     }
@@ -208,8 +224,9 @@ export default function AddSourceModal({
       case 'GoogleDrive':
         // Whatever the resolver read out of the pasted link.
         return {
-          reference: resolved?.sourceReference ?? srcOf(source).label,
-          options: resolved?.options ?? {},
+          reference: picked.length ? `${srcOf(source).label} › ${pickedSummary()}` : resolved?.sourceReference ?? srcOf(source).label,
+          // Picked in the browser: folders and files, each with what the importer needs.
+          options: picked.length ? { items: picked } : resolved?.options ?? {},
         };
       case 'AzureDevOps':
         return {
@@ -223,7 +240,7 @@ export default function AddSourceModal({
 
   const canSubmit = !busy && !needsAuth && source !== 'Local'
     && (source !== 'GitHub' || repository.trim().length > 0)
-    && (!usesExternalSignIn || resolved !== null)
+    && (!usesExternalSignIn || resolved !== null || picked.length > 0)
     && (source !== 'AzureDevOps' || Boolean(azOrg && azProject && azWiki));
 
   return (
@@ -321,15 +338,43 @@ export default function AddSourceModal({
                 disabled={busy}
                 style={{ border: 0, background: 'transparent', color: '#1F7A4F', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}
               >Switch account</button>
+              <button
+                onClick={() => connection && setRemoving(connection)}
+                disabled={busy}
+                style={{ border: 0, background: 'transparent', color: '#B13A26', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}
+              >Remove</button>
             </div>
 
-            <Field label={`Link to the ${source === 'GoogleDrive' ? 'Drive' : 'SharePoint'} folder`}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <Button variant="primary" onClick={() => setBrowsing(true)}>
+                {source === 'GoogleDrive' ? 'Browse Google Drive' : 'Browse SharePoint / OneDrive'}
+              </Button>
+              <span style={{ fontSize: 12, color: c.dim }}>Pick folders and files, the way you would in {srcOf(source).label}.</span>
+            </div>
+
+            {picked.length > 0 && (
+              <div style={{ border: `1px solid ${c.border}`, borderRadius: 10, padding: '8px 10px', background: c.accentTint, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {picked.map(item => (
+                  <div key={`${item.driveId ?? ''}/${item.id}`} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+                    <span>{item.folder ? '📁' : '📄'}</span>
+                    <span style={{ flex: 1, color: c.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.name}</span>
+                    <button
+                      onClick={() => setPicked(picked.filter(x => x !== item))}
+                      style={{ border: 0, background: 'transparent', color: c.muted, cursor: 'pointer', fontSize: 13 }}
+                      aria-label={`Remove ${item.name}`}
+                    >×</button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <Field label={`Or paste a link to a ${source === 'GoogleDrive' ? 'Drive' : 'SharePoint or OneDrive'} folder`}>
               <div style={{ display: 'flex', gap: 8 }}>
                 <Input
                   value={link}
                   placeholder={source === 'GoogleDrive'
                     ? 'https://drive.google.com/drive/folders/…'
-                    : 'https://contoso.sharepoint.com/sites/Claims/Shared Documents/…'}
+                    : 'A SharePoint folder, or a OneDrive folder or share link'}
                   onChange={e => { setLink(e.target.value); setResolved(null); }}
                   onKeyDown={e => { if (e.key === 'Enter') void resolveLink(); }}
                 />
@@ -339,7 +384,7 @@ export default function AddSourceModal({
               </div>
             </Field>
 
-            {resolved ? (
+            {picked.length > 0 ? null : resolved ? (
               <div style={{
                 display: 'flex', alignItems: 'center', gap: 10, fontSize: 13,
                 border: `1px solid ${c.border}`, borderRadius: 10, padding: '10px 12px', background: c.accentTint,
@@ -371,17 +416,39 @@ export default function AddSourceModal({
                 <span>✓</span>
                 <span style={{ flex: 1 }}>Connected{connection.account ? ` as ${connection.account}` : ''} — private repositories it can read are reachable.</span>
                 <button
-                  onClick={() => void disconnectGitHub()}
+                  onClick={() => setRemoving(connection)}
                   disabled={busy}
-                  style={{ border: 0, background: 'transparent', color: '#1F7A4F', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}
-                >Disconnect</button>
+                  style={{ border: 0, background: 'transparent', color: '#B13A26', cursor: 'pointer', fontSize: 12, fontWeight: 500 }}
+                >Remove</button>
               </div>
             ) : (
               <div style={{ border: `1px dashed ${c.borderStrong}`, borderRadius: 10, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <div style={{ fontSize: 13, color: c.soft }}>
-                  <b>Not connected.</b> Public repositories work as they are. For a private one, connect with a GitHub{' '}
+                  <b>Not connected.</b> Public repositories work as they are. For a private one, sign in to GitHub
+                  in a separate window and approve Dochub's access.
+                </div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <Button variant="primary" disabled={busy || !gitHubSignIn} onClick={() => void signInGitHub()}>
+                    {busy && !pasteToken ? 'Waiting for sign-in…' : 'Sign in with GitHub'}
+                  </Button>
+                  {!pasteToken && (
+                    <button
+                      onClick={() => setPasteToken(true)}
+                      style={{ border: 0, background: 'transparent', color: c.dim, cursor: 'pointer', fontSize: 12 }}
+                    >Advanced: use a token</button>
+                  )}
+                </div>
+                {!gitHubSignIn && options.data && (
+                  <div style={{ fontSize: 12, color: '#94600F', lineHeight: 1.5 }}>
+                    GitHub sign-in isn't set up on this Dochub yet: an administrator registers a GitHub OAuth App
+                    and adds its client id and secret under <code>OAuth:GitHub</code>.
+                  </div>
+                )}
+                {pasteToken && (<>
+                <div style={{ fontSize: 12, color: c.dim, lineHeight: 1.5 }}>
+                  A GitHub{' '}
                   <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noreferrer" style={{ color: c.accent }}>
-                    fine-grained personal access token</a> that has read-only <i>Contents</i> access to the repositories you need.
+                    fine-grained personal access token</a> with read-only <i>Contents</i> access to the repositories you need.
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
                   <Input
@@ -392,9 +459,11 @@ export default function AddSourceModal({
                     onKeyDown={e => { if (e.key === 'Enter') void connectGitHub(); }}
                   />
                   <Button disabled={busy || !githubToken.trim()} onClick={() => void connectGitHub()}>
-                    {busy ? 'Checking…' : 'Connect GitHub'}
+                    {busy ? 'Checking…' : 'Connect'}
                   </Button>
+                  <Button variant="ghost" onClick={() => { setPasteToken(false); setGithubToken(''); }}>Cancel</Button>
                 </div>
+                </>)}
               </div>
             )}
             <Field label="Repository">
@@ -455,6 +524,38 @@ export default function AddSourceModal({
           </div>
         )}
       </div>
+
+      {browsing && connection && (
+        <FileBrowser
+          connection={connection}
+          onClose={() => setBrowsing(false)}
+          onPick={items => {
+            // Picking again adds to the list; the same item is never listed twice.
+            const seen = new Set(picked.map(x => `${x.driveId ?? ''}/${x.id}`));
+            setPicked([...picked, ...items.filter(x => !seen.has(`${x.driveId ?? ''}/${x.id}`))]);
+            setResolved(null);
+            setLink('');
+            setBrowsing(false);
+          }}
+        />
+      )}
+
+      {removing && (
+        <RemoveConnection
+          connection={removing}
+          onClose={() => setRemoving(null)}
+          onRemoved={() => {
+            showToast({
+              icon: '✓', dot: '#2E9A64', title: `${removing.displayName} removed`,
+              body: 'Connect again below whenever you need it.',
+            });
+            setRemoving(null);
+            setResolved(null);
+            setPicked([]);
+            invalidate();
+          }}
+        />
+      )}
     </Modal>
   );
 }
